@@ -381,18 +381,18 @@
   <button id="settingsBtn" class="ctl">⚙️ Tune</button>
   <div id="settings">
     <h4>🎛 WINDOW TUNING</h4>
+    <label>Screen width <span id="v_screenCm"></span></label>
+    <input type="range" id="s_screenCm" min="10" max="80" step="1" />
+    <label>Room depth <span id="v_roomDepthM"></span></label>
+    <input type="range" id="s_roomDepthM" min="0.5" max="15" step="0.5" />
+    <label>Intensity <span id="v_intensity"></span></label>
+    <input type="range" id="s_intensity" min="0.3" max="4" step="0.1" />
     <label>Pivot down <span id="v_pivotDown"></span></label>
     <input type="range" id="s_pivotDown" min="0" max="20" step="0.5" />
     <label>Pivot back <span id="v_pivotBack"></span></label>
     <input type="range" id="s_pivotBack" min="0" max="25" step="0.5" />
-    <label>Parallax <span id="v_parallax"></span></label>
-    <input type="range" id="s_parallax" min="0" max="12" step="0.5" />
-    <label>Dolly <span id="v_dolly"></span></label>
-    <input type="range" id="s_dolly" min="0" max="40" step="1" />
     <label>Smoothing <span id="v_smooth"></span></label>
     <input type="range" id="s_smooth" min="0.05" max="1" step="0.05" />
-    <label>Corridor depth <span id="v_depth"></span></label>
-    <input type="range" id="s_depth" min="600" max="4000" step="100" />
     <div class="row">
       <button id="tilesToggle">Tiles: on</button>
       <button id="recenterBtn">Re-center</button>
@@ -512,14 +512,19 @@
     // locate the neck rotation pivot relative to the face centre — tune them
     // until turning your head in place produces ZERO scene movement.
     const params = {
-      pivotDown: 8,   // cm below face centre to the neck pivot
-      pivotBack: 10,  // cm behind face centre to the neck pivot
-      parallax: 4.0,  // perspective-origin % per cm of movement
-      dolly: 12,      // px dolly per cm of movement
-      smooth: 0.25,   // EMA factor (lower = steadier, higher = snappier)
-      depth: 2200,    // corridor depth (px)
+      pivotDown: 8,    // cm below face centre to the neck pivot
+      pivotBack: 10,   // cm behind face centre to the neck pivot
+      smooth: 0.25,    // EMA factor (lower = steadier, higher = snappier)
+      screenCm: 30,    // physical screen WIDTH (cm) → sets the px-per-cm scale
+      roomDepthM: 3,   // corridor real depth (metres) → sets the room scale
+      intensity: 1.0,  // 0.3 subtle … 4 extreme (party); 1 ≈ life-like window
       showTiles: true
     };
+    // Real-world → screen-pixel scale, from the measured screen width. Making
+    // the room dimensions real turns the parallax physical: at intensity 1 the
+    // scene shifts as an actual window would; crank intensity for party games.
+    const pxPerCm = () => window.innerWidth / params.screenCm;
+    const corridorDepthPx = () => params.roomDepthM * 100 * pxPerCm();
     let lookedTile = null;      // tile currently under gaze
     let tileEls = [];
 
@@ -931,23 +936,37 @@
         : [hx, hy, dist];
       if (!headBaseline) headBaseline = [...headSmooth];
 
-      const ox = Math.max(-80, Math.min(180,
-        50 + (headSmooth[0] - headBaseline[0]) * params.parallax));
-      const oy = Math.max(-80, Math.min(180,
-        50 + (headSmooth[1] - headBaseline[1]) * params.parallax));
-      targetsEl.style.perspectiveOrigin = `${ox.toFixed(1)}% ${oy.toFixed(1)}%`;
+      // Physical scale: convert real cm of movement into screen px. At
+      // intensity 1 this is a geometrically-honest window; intensity scales
+      // the eye displacement for subtle → extreme feels.
+      const ppc = pxPerCm();
+      const gain = ppc * params.intensity;
 
-      // Lean in → dolly into the corridor; lean back → retreat to the window.
-      const dz = Math.max(-220, Math.min(600,
-        (headBaseline[2] - headSmooth[2]) * params.dolly));
+      // Dynamic perspective = the viewer's real distance in px, so the window
+      // frustum matches how far you actually are (closer → wider look-around).
+      const persp = Math.max(300, headSmooth[2] * ppc);
+      targetsEl.style.perspective = `${persp.toFixed(0)}px`;
+
+      // Off-axis projection: shift the eye point (perspective-origin) by the
+      // viewer's real displacement from the baseline. Absolute px from centre.
+      const ox = (headSmooth[0] - headBaseline[0]) * gain;
+      const oy = (headSmooth[1] - headBaseline[1]) * gain;
+      const cxpx = window.innerWidth / 2 + ox;
+      const cypx = window.innerHeight / 2 + oy;
+      targetsEl.style.perspectiveOrigin = `${cxpx.toFixed(1)}px ${cypx.toFixed(1)}px`;
+
+      // Lean in → dolly into the corridor (1:1 px at intensity 1); lean back
+      // → retreat toward the window plane.
+      const dz = Math.max(-0.6 * corridorDepthPx(), Math.min(0.9 * corridorDepthPx(),
+        (headBaseline[2] - headSmooth[2]) * gain));
       const dolly = `translateZ(${dz.toFixed(1)}px)`;
       sceneEl.style.transform = dolly;
       roomEl.style.transform = dolly;
 
       if (settingsPanel.classList.contains("visible")) {
         readoutEl.textContent =
-          `pivot x ${headSmooth[0].toFixed(1)}  y ${headSmooth[1].toFixed(1)}\n` +
-          `dist  ${headSmooth[2].toFixed(1)}   origin ${ox.toFixed(0)}% ${oy.toFixed(0)}%`;
+          `move  x ${(headSmooth[0]-headBaseline[0]).toFixed(1)}  y ${(headSmooth[1]-headBaseline[1]).toFixed(1)} cm\n` +
+          `dist ${headSmooth[2].toFixed(1)} cm   ${ppc.toFixed(1)} px/cm   persp ${persp.toFixed(0)}`;
       }
     }
 
@@ -956,13 +975,18 @@
     function buildRings() {
       const ringsEl = document.getElementById("rings");
       ringsEl.innerHTML = "";
+      const depth = corridorDepthPx();
       const n = 9;
       for (let i = 1; i <= n; i++) {
         const r = document.createElement("div");
         r.className = "ring";
-        r.style.transform = `translateZ(${(-params.depth * i / n).toFixed(0)}px)`;
+        r.style.transform = `translateZ(${(-depth * i / n).toFixed(0)}px)`;
         ringsEl.appendChild(r);
       }
+    }
+    function applyRoomScale() {
+      roomEl.style.setProperty("--depth", `${corridorDepthPx().toFixed(0)}px`);
+      buildRings();
     }
 
     function enterGazeMode() {
@@ -1308,8 +1332,7 @@
       threeDBtn.classList.toggle("on", threeD);
       targetsEl.classList.toggle("three-d", threeD);
       if (threeD) {
-        roomEl.style.setProperty("--depth", `${params.depth}px`);
-        buildRings();
+        applyRoomScale();
         targetsEl.classList.toggle("sandbox", !params.showTiles);
         tileEls.forEach((el, i) =>
           el.style.setProperty("--tz", `${TILE_DEPTHS[i % TILE_DEPTHS.length]}px`));
@@ -1322,6 +1345,7 @@
       } else {
         tileEls.forEach((el) => el.style.removeProperty("--tz"));
         targetsEl.style.perspectiveOrigin = "";
+        targetsEl.style.perspective = "";
         sceneEl.style.transform = "";
         roomEl.style.transform = "";
         targetsEl.classList.remove("sandbox");
@@ -1333,13 +1357,12 @@
     });
 
     // ---- Window tuning panel ----
-    const SLIDERS = ["pivotDown", "pivotBack", "parallax", "dolly", "smooth", "depth"];
+    const SLIDERS = ["pivotDown", "pivotBack", "smooth", "screenCm", "roomDepthM", "intensity"];
+    const UNIT = { pivotDown: " cm", pivotBack: " cm", screenCm: " cm", roomDepthM: " m", smooth: "", intensity: "×" };
     function refreshSettingsUI() {
       for (const k of SLIDERS) {
         document.getElementById("s_" + k).value = params[k];
-        const unit = k === "depth" ? "px"
-          : (k === "pivotDown" || k === "pivotBack") ? " cm" : "";
-        document.getElementById("v_" + k).textContent = params[k] + unit;
+        document.getElementById("v_" + k).textContent = params[k] + UNIT[k];
       }
       tilesToggleBtn.textContent = "Tiles: " + (params.showTiles ? "on" : "off");
       tilesToggleBtn.classList.toggle("active", params.showTiles);
@@ -1349,10 +1372,7 @@
       el.addEventListener("pointerdown", (e) => e.stopPropagation());
       el.addEventListener("input", () => {
         params[k] = parseFloat(el.value);
-        if (k === "depth") {
-          roomEl.style.setProperty("--depth", `${params.depth}px`);
-          buildRings();
-        }
+        if (k === "screenCm" || k === "roomDepthM") applyRoomScale();
         refreshSettingsUI();
       });
     }
