@@ -70,6 +70,45 @@
       transform-style: preserve-3d;
       will-change: transform;
     }
+
+    /* ---------- The room (window-into-a-3D-scene, 3D mode only) ----------
+       A 600px-deep box built from wall planes with grid textures. The scene
+       is NEVER rotated — only the perspective-origin moves with your head,
+       which is the CSS approximation of an off-axis projection: exactly how
+       a real window behaves. */
+    #room {
+      position: absolute;
+      inset: 0;
+      display: none;
+      transform-style: preserve-3d;
+      will-change: transform;
+      pointer-events: none;
+    }
+    #targets.three-d #room { display: block; }
+    .face {
+      position: absolute;
+      background:
+        repeating-linear-gradient(0deg,
+          rgba(0, 255, 140, 0.16) 0 1px, transparent 1px 60px),
+        repeating-linear-gradient(90deg,
+          rgba(0, 255, 140, 0.16) 0 1px, transparent 1px 60px),
+        rgba(0, 20, 8, 0.25);
+    }
+    .face.back {
+      inset: 0;
+      transform: translateZ(-600px);
+      background:
+        radial-gradient(circle at 50% 50%, rgba(0, 255, 140, 0.10), transparent 70%),
+        repeating-linear-gradient(0deg,
+          rgba(0, 255, 140, 0.20) 0 1px, transparent 1px 60px),
+        repeating-linear-gradient(90deg,
+          rgba(0, 255, 140, 0.20) 0 1px, transparent 1px 60px),
+        rgba(0, 12, 5, 0.45);
+    }
+    .face.left   { top: 0; bottom: 0; left: 0;  width: 600px;  transform-origin: left center;   transform: rotateY(90deg); }
+    .face.right  { top: 0; bottom: 0; right: 0; width: 600px;  transform-origin: right center;  transform: rotateY(-90deg); }
+    .face.top    { left: 0; right: 0; top: 0;    height: 600px; transform-origin: center top;    transform: rotateX(-90deg); }
+    .face.bottom { left: 0; right: 0; bottom: 0; height: 600px; transform-origin: center bottom; transform: rotateX(90deg); }
     .tile {
       display: flex;
       flex-direction: column;
@@ -267,7 +306,16 @@
   <video id="video" autoplay muted playsinline webkit-playsinline></video>
   <canvas id="overlay"></canvas>
 
-  <div id="targets" aria-hidden="true"><div id="scene"></div></div>
+  <div id="targets" aria-hidden="true">
+    <div id="room">
+      <div class="face back"></div>
+      <div class="face left"></div>
+      <div class="face right"></div>
+      <div class="face top"></div>
+      <div class="face bottom"></div>
+    </div>
+    <div id="scene"></div>
+  </div>
   <div id="gazeCursor"></div>
   <div id="calTarget"></div>
 
@@ -339,6 +387,7 @@
     const handsBtn     = document.getElementById("handsBtn");
     const threeDBtn    = document.getElementById("threeDBtn");
     const sceneEl      = document.getElementById("scene");
+    const roomEl       = document.getElementById("room");
     const statusEl = document.getElementById("status");
     const startBtn = document.getElementById("start");
     const calBtn   = document.getElementById("calibrateBtn");
@@ -371,9 +420,9 @@
     let pinched = false;        // pinch state with hysteresis
     let pointedTile = null;     // tile currently under the index fingertip
 
-    // 3D mode: tiles at staggered depths, camera coupled to the tracked head
-    // position (fish-tank VR — motion parallax without a headset).
-    const TILE_DEPTHS = [-140, 60, -40, 130, -100, 20]; // px translateZ per tile
+    // 3D mode: tiles float INSIDE the room (all depths behind the screen
+    // plane), camera coupled to the tracked head — a window into a 3D scene.
+    const TILE_DEPTHS = [-320, -80, -180, -40, -260, -120]; // px translateZ per tile
     let threeD = false;
     let headSmooth = null;      // smoothed [screenX, screenY, iod]
     let iodBaseline = null;     // head distance captured when 3D is enabled
@@ -738,9 +787,11 @@
       });
     }
 
-    // Head-coupled perspective: the scene rotates and scales opposite to the
-    // tracked head, so tiles at different depths shift against each other —
-    // real motion parallax through a virtual window.
+    // Head-coupled window: the scene is NEVER rotated — a real window doesn't
+    // turn to face you. Only the perspective-origin (the viewer's eye
+    // position) follows the tracked head, which approximates an off-axis
+    // projection: near and far geometry shift against each other exactly as
+    // through a physical window. Leaning in dollies the whole room closer.
     function updateParallax(lm) {
       if (!threeD) return;
       const nose = lm[NOSE_TIP];
@@ -754,14 +805,18 @@
         : [sx, sy, iod];
       if (!iodBaseline) iodBaseline = headSmooth[2];
 
-      const ry = Math.max(-18, Math.min(18, (headSmooth[0] - 0.5) * 40));
-      const rx = Math.max(-18, Math.min(18, -(headSmooth[1] - 0.5) * 40));
-      // Lean in → scene comes closer; lean back → recedes.
-      const s = Math.max(0.8, Math.min(1.35, 1 + (headSmooth[2] / iodBaseline - 1) * 2.5));
+      // Amplified eye position: head movement is small relative to screen
+      // size, so scale it up for a strong look-around effect.
+      const ox = 50 + (headSmooth[0] - 0.5) * 220;
+      const oy = 50 + (headSmooth[1] - 0.5) * 220;
+      targetsEl.style.perspectiveOrigin = `${ox.toFixed(1)}% ${oy.toFixed(1)}%`;
 
-      targetsEl.style.perspectiveOrigin =
-        `${headSmooth[0] * 100}% ${headSmooth[1] * 100}%`;
-      sceneEl.style.transform = `rotateX(${rx.toFixed(2)}deg) rotateY(${ry.toFixed(2)}deg) scale(${s.toFixed(3)})`;
+      // Lean in → dolly into the room; lean back → retreat to the window.
+      const dz = Math.max(-180, Math.min(320,
+        (headSmooth[2] / iodBaseline - 1) * 900));
+      const dolly = `translateZ(${dz.toFixed(1)}px)`;
+      sceneEl.style.transform = dolly;
+      roomEl.style.transform = dolly;
     }
 
     function enterGazeMode() {
@@ -1111,11 +1166,12 @@
         headSmooth = null;
         iodBaseline = null; // re-baseline "how far away is the user" on enable
         targetsEl.classList.add("visible");
-        setStatus("3D on — move your head to look around the tiles.");
+        setStatus("3D on — a window into a room. Move your head; lean in to enter.");
       } else {
         tileEls.forEach((el) => el.style.removeProperty("--tz"));
         targetsEl.style.perspectiveOrigin = "";
         sceneEl.style.transform = "";
+        roomEl.style.transform = "";
         if (mode !== "gaze" && !handsOn) targetsEl.classList.remove("visible");
         setStatus("3D off.");
       }

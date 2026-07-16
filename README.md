@@ -30,11 +30,15 @@ No build step, no native app, no Xcode — just one `index.html`.
    and a **thumb-index pinch selects** the tile under it — with hysteresis so
    the pinch doesn't flicker, and hand-size normalization so it works at any
    distance. Works with or without gaze calibration, alongside look-and-tap.
-9. **3D mode** (🧊 toggle): tiles float at staggered depths in CSS 3D space,
-   and the camera is **coupled to your tracked head** — move your head and
-   the scene shifts with true motion parallax (fish-tank VR, no headset);
-   lean in and the tiles come closer. Gaze, touch, and pinch selection all
-   still work — hit-testing uses the projected on-screen tile positions.
+9. **3D window mode** (🧊 toggle): the screen becomes a **window into a
+   600px-deep room** — grid-textured walls, floor, and ceiling receding
+   behind the glass, with the tiles floating inside at staggered depths.
+   The viewer's eye position (perspective-origin) follows your tracked
+   head, approximating an off-axis projection: the scene never rotates,
+   just like a real window — near and far geometry shift against each
+   other as you move, and **leaning in dollies you into the room**. Gaze,
+   touch, and pinch selection all still work — hit-testing uses the
+   projected on-screen tile positions.
 10. **Look and Tap**: after calibrating, a green gaze cursor follows your eyes
    across a grid of app tiles. The tile you're looking at lights up; tapping
    **anywhere** on the screen selects it (with haptic feedback where
