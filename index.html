@@ -121,6 +121,8 @@
     .wall.right  { top: 0; bottom: 0; right: 0; width: var(--depth);  transform-origin: right center;  transform: rotateY(-90deg); }
     .wall.ceil   { left: 0; right: 0; top: 0;    height: var(--depth); transform-origin: center top;    transform: rotateX(-90deg); }
     .wall.floor  { left: 0; right: 0; bottom: 0; height: var(--depth); transform-origin: center bottom; transform: rotateX(90deg); }
+    /* backface-visibility hidden reduces GPU work and coplanar shimmer. */
+    #room, #scene, .wall, .ring, .tile { backface-visibility: hidden; }
     #rings { position: absolute; inset: 0; transform-style: preserve-3d; }
     .ring {
       position: absolute;
@@ -289,11 +291,16 @@
       max-width: 62vw;
       padding: 12px 14px;
       border-radius: 14px;
-      background: rgba(0, 0, 0, 0.72);
+      background: rgba(0, 0, 0, 0.88);
       border: 1px solid rgba(0, 255, 140, 0.3);
       color: #cfffe6;
       font-size: 12px;
       display: none;
+      /* Force the panel onto its own stable compositor layer so the corridor's
+         3D rendering can't starve it (was going black/unclickable under load). */
+      isolation: isolate;
+      transform: translateZ(0);
+      will-change: transform;
     }
     #settings.visible { display: block; }
     #settings h4 { margin: 0 0 6px; font-size: 12px; color: #8affc4; letter-spacing: 0.05em; }
@@ -391,8 +398,6 @@
   <button id="settingsBtn" class="ctl">⚙️ Tune</button>
   <div id="settings">
     <h4>🎛 WINDOW TUNING</h4>
-    <label>Screen width <span id="v_screenCm"></span></label>
-    <input type="range" id="s_screenCm" min="10" max="80" step="1" />
     <label>Room depth <span id="v_roomDepthM"></span></label>
     <input type="range" id="s_roomDepthM" min="0.5" max="15" step="0.5" />
     <label>Intensity <span id="v_intensity"></span></label>
@@ -525,16 +530,18 @@
       pivotDown: 8,    // cm below face centre to the neck pivot
       pivotBack: 10,   // cm behind face centre to the neck pivot
       smooth: 0.25,    // EMA factor (lower = steadier, higher = snappier)
-      screenCm: 30,    // physical screen WIDTH (cm) → sets the px-per-cm scale
-      roomDepthM: 3,   // corridor real depth (metres) → sets the room scale
-      intensity: 1.0,  // 0.3 subtle … 4 extreme (party); 1 ≈ life-like window
+      roomDepthM: 3,   // corridor depth (metres) → sets the (bounded) room scale
+      intensity: 1.0,  // 0.5 subtle/realistic … 4 extreme (party games)
       showTiles: true
     };
-    // Real-world → screen-pixel scale, from the measured screen width. Making
-    // the room dimensions real turns the parallax physical: at intensity 1 the
-    // scene shifts as an actual window would; crank intensity for party games.
-    const pxPerCm = () => window.innerWidth / params.screenCm;
-    const corridorDepthPx = () => params.roomDepthM * 100 * pxPerCm();
+    // Corridor depth is BOUNDED in px. CSS 3D compositing loses float precision
+    // past a few thousand px of translateZ — that was the source of the green-
+    // line flicker, the tearing, and the GPU pressure that blanked the panel.
+    // We keep all depth in a safe band; the ratio still conveys "deeper room".
+    const corridorDepthPx = () => Math.max(600, Math.min(2600, params.roomDepthM * 480));
+    const PERSP = 1100;    // fixed perspective (px); set once, never per-frame
+    const REACH_CM = 25;   // head travel (cm) that reaches the shift limit @ 1×
+    let lastDolly = "";
     let lookedTile = null;      // tile currently under gaze
     let tileEls = [];
 
@@ -946,37 +953,38 @@
         : [hx, hy, dist];
       if (!headBaseline) headBaseline = [...headSmooth];
 
-      // Physical scale: convert real cm of movement into screen px. At
-      // intensity 1 this is a geometrically-honest window; intensity scales
-      // the eye displacement for subtle → extreme feels.
-      const ppc = pxPerCm();
-      const gain = ppc * params.intensity;
+      // Head-coupled off-axis shift, mapped for a REALISTIC, bounded feel.
+      // A head move of REACH_CM reaches the shift limit (20% of the screen) at
+      // intensity 1×, and the result is CLAMPED — so a small move gives a small
+      // shift and a big move saturates gently, instead of a tiny lean throwing
+      // the view to the far side of the room. Intensity scales the sensitivity.
+      const iw = window.innerWidth, ih = window.innerHeight;
+      const maxSX = 0.20 * iw, maxSY = 0.20 * ih;
+      const dx = headSmooth[0] - headBaseline[0];
+      const dy = headSmooth[1] - headBaseline[1];
+      const ddist = headBaseline[2] - headSmooth[2];
+      const ox = Math.max(-maxSX, Math.min(maxSX, dx * (maxSX / REACH_CM) * params.intensity));
+      const oy = Math.max(-maxSY, Math.min(maxSY, dy * (maxSY / REACH_CM) * params.intensity));
+      targetsEl.style.perspectiveOrigin = `${Math.round(iw / 2 + ox)}px ${Math.round(ih / 2 + oy)}px`;
 
-      // Dynamic perspective = the viewer's real distance in px, so the window
-      // frustum matches how far you actually are (closer → wider look-around).
-      const persp = Math.max(300, headSmooth[2] * ppc);
-      targetsEl.style.perspective = `${persp.toFixed(0)}px`;
+      // Lean in → dolly a little way down the corridor; clamped and gentle.
+      // Only written when it actually changes (fewer style recalcs → smoother).
+      const depthPx = corridorDepthPx();
+      const dz = Math.max(-0.5 * depthPx, Math.min(0.85 * depthPx,
+        ddist * 8 * params.intensity));
+      const dolly = `translateZ(${Math.round(dz)}px)`;
+      if (dolly !== lastDolly) {
+        sceneEl.style.transform = dolly;
+        roomEl.style.transform = dolly;
+        lastDolly = dolly;
+      }
 
-      // Off-axis projection: shift the eye point (perspective-origin) by the
-      // viewer's real displacement from the baseline. Absolute px from centre.
-      const ox = (headSmooth[0] - headBaseline[0]) * gain;
-      const oy = (headSmooth[1] - headBaseline[1]) * gain;
-      const cxpx = window.innerWidth / 2 + ox;
-      const cypx = window.innerHeight / 2 + oy;
-      targetsEl.style.perspectiveOrigin = `${cxpx.toFixed(1)}px ${cypx.toFixed(1)}px`;
-
-      // Lean in → dolly into the corridor (1:1 px at intensity 1); lean back
-      // → retreat toward the window plane.
-      const dz = Math.max(-0.6 * corridorDepthPx(), Math.min(0.9 * corridorDepthPx(),
-        (headBaseline[2] - headSmooth[2]) * gain));
-      const dolly = `translateZ(${dz.toFixed(1)}px)`;
-      sceneEl.style.transform = dolly;
-      roomEl.style.transform = dolly;
-
-      if (settingsPanel.classList.contains("visible")) {
+      // Throttle the read-out: per-frame DOM text writes under GPU load were
+      // part of what starved the panel's compositor layer (black/unclickable).
+      if (settingsPanel.classList.contains("visible") && frameCount % 6 === 0) {
         readoutEl.textContent =
-          `move  x ${(headSmooth[0]-headBaseline[0]).toFixed(1)}  y ${(headSmooth[1]-headBaseline[1]).toFixed(1)} cm\n` +
-          `dist ${headSmooth[2].toFixed(1)} cm   ${ppc.toFixed(1)} px/cm   persp ${persp.toFixed(0)}`;
+          `move x ${dx.toFixed(1)}  y ${dy.toFixed(1)} cm   lean ${ddist.toFixed(1)}\n` +
+          `dist ${headSmooth[2].toFixed(1)} cm   shift ${Math.round(ox)},${Math.round(oy)} px`;
       }
     }
 
@@ -1342,12 +1350,14 @@
       threeDBtn.classList.toggle("on", threeD);
       targetsEl.classList.toggle("three-d", threeD);
       if (threeD) {
+        targetsEl.style.perspective = `${PERSP}px`; // set once — not per frame
         applyRoomScale();
         targetsEl.classList.toggle("sandbox", !params.showTiles);
         tileEls.forEach((el, i) =>
           el.style.setProperty("--tz", `${TILE_DEPTHS[i % TILE_DEPTHS.length]}px`));
         headSmooth = null;
         headBaseline = null; // capture the resting position on enable
+        lastDolly = "";
         targetsEl.classList.add("visible");
         settingsBtn.classList.add("visible");
         refreshSettingsUI();
@@ -1367,8 +1377,8 @@
     });
 
     // ---- Window tuning panel ----
-    const SLIDERS = ["pivotDown", "pivotBack", "smooth", "screenCm", "roomDepthM", "intensity"];
-    const UNIT = { pivotDown: " cm", pivotBack: " cm", screenCm: " cm", roomDepthM: " m", smooth: "", intensity: "×" };
+    const SLIDERS = ["roomDepthM", "intensity", "pivotDown", "pivotBack", "smooth"];
+    const UNIT = { pivotDown: " cm", pivotBack: " cm", roomDepthM: " m", smooth: "", intensity: "×" };
     function refreshSettingsUI() {
       for (const k of SLIDERS) {
         document.getElementById("s_" + k).value = params[k];
@@ -1382,7 +1392,7 @@
       el.addEventListener("pointerdown", (e) => e.stopPropagation());
       el.addEventListener("input", () => {
         params[k] = parseFloat(el.value);
-        if (k === "screenCm" || k === "roomDepthM") applyRoomScale();
+        if (k === "roomDepthM") applyRoomScale();
         refreshSettingsUI();
       });
     }

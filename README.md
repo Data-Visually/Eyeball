@@ -46,17 +46,18 @@ No build step, no native app, no Xcode — just one `index.html`.
      about this pivot, its position is invariant to head rotation — so
      **turning your head in place produces zero scene movement**; only
      translating your body (which moves the pivot) shifts the view.
-   - **Measurement-driven scale**: enter your **screen width** (sets the
-     real px-per-cm) and the **room depth in metres**, and the corridor takes
-     on a true physical scale — at intensity 1× the parallax and lean-in dolly
-     move as an actual window would (the perspective distance tracks your real
-     distance from the screen). An **intensity** slider spans subtle/life-like
-     (0.3×) to wild/party-game exaggeration (4×) from the same calibrated base.
-   - **⚙️ Tune panel**: live sliders for screen width, room depth, intensity,
-     the neck-pivot offset (down/back — dial until head turns produce no
-     drift), and smoothing, plus a **Tiles on/off sandbox** for a pure
-     corridor to experiment in and a **Re-center** button. A readout shows
-     the live tracked movement, distance, and px-per-cm scale.
+   - **Bounded, realistic motion**: head movement maps to a *clamped* view
+     shift — a move of ~25 cm reaches the limit (20 % of the screen) at
+     intensity 1×, so a small lean gives a small shift and a large move
+     saturates gently rather than throwing you to the far wall. All 3D depth
+     is capped to a safe pixel band (≤ 2600 px) because CSS 3D loses precision
+     past that and starts to flicker/tear; perspective is set once, not
+     per-frame, to keep compositing stable.
+   - **⚙️ Tune panel**: live sliders for room depth, intensity (0.5× subtle →
+     4× party), the neck-pivot offset (down/back — dial until head turns
+     produce no drift), and smoothing, plus a **Tiles on/off sandbox** and a
+     **Re-center** button. A throttled readout shows the live tracked movement
+     and view shift.
 10. **Look and Tap**: after calibrating, a green gaze cursor follows your eyes
    across a grid of app tiles. The tile you're looking at lights up; tapping
    **anywhere** on the screen selects it (with haptic feedback where
