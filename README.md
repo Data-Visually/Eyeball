@@ -31,8 +31,10 @@ No build step, no native app, no Xcode — just one `index.html`.
    the pinch doesn't flicker, and hand-size normalization so it works at any
    distance. Works with or without gaze calibration, alongside look-and-tap.
 9. **3D window mode** (🧊 toggle): the screen becomes a **window into a deep
-   corridor** — grid-textured walls plus nested depth rings receding into the
-   distance, with the app tiles floating inside at staggered depths. The
+   corridor** — an opaque dark backdrop hides the camera feed so you're
+   looking *into* a real space (not a wireframe over your face), with solid
+   grid-textured walls, nested depth rings, and a glowing vanishing point at
+   the far end. App tiles float inside at staggered depths. The
    viewer's eye position (perspective-origin) follows your head, approximating
    an off-axis projection: the scene never rotates, just like a real window —
    near and far geometry shift against each other as you move, and **leaning
