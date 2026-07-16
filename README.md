@@ -13,10 +13,18 @@ No build step, no native app, no Xcode — just one `index.html`.
    on both iris centers** on a canvas overlaid on the video.
 4. Logs the **right iris center coordinates to the console every 60 frames**
    (normalized + pixel coordinates + relative z-depth).
-5. **Gaze calibration**: a 9-point routine — look at each yellow dot and tap;
+5. **Tracking modes**: a toggle picks between **👀 Eyes only** (iris + eye
+   blendshapes; hold the device steady and point with your eyes) and
+   **👀+🙂 Eyes + head** (default; head pose joins the regression, matching
+   how people naturally glance at things). Switching modes requires a fresh
+   calibration.
+6. **Wireframe face mesh** during calibration — the full 478-point
+   tesselation drawn live over your face, confirming tracking is locked on
+   every dot.
+7. **Gaze calibration**: a 9-point routine — look at each yellow dot and tap;
    the app samples your iris-vs-eye-corner geometry for ~1 s per dot and fits
    a quadratic regression from gaze features to screen coordinates.
-6. **Look and Tap**: after calibrating, a green gaze cursor follows your eyes
+8. **Look and Tap**: after calibrating, a green gaze cursor follows your eyes
    across a grid of app tiles. The tile you're looking at lights up; tapping
    **anywhere** on the screen selects it (with haptic feedback where
    supported). Look chooses, tap confirms.

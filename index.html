@@ -173,6 +173,36 @@
     #calibrateBtn   { left: 50%; transform: translateX(-50%); }
     #recalibrateBtn { right: 16px; background: rgba(255, 255, 255, 0.85); color: #000; font-size: 13px; padding: 9px 14px; }
 
+    /* Tracking-mode segmented toggle (eyes only vs eyes + head) */
+    #modeToggle {
+      position: fixed;
+      z-index: 6;
+      left: 50%;
+      transform: translateX(-50%);
+      /* stacked above the Calibrate button so they never overlap on
+         narrow screens */
+      bottom: calc(max(20px, env(safe-area-inset-bottom)) + 58px);
+      display: none;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(0, 0, 0, 0.55);
+      border: 1px solid rgba(255, 255, 255, 0.25);
+    }
+    #modeToggle.visible { display: flex; }
+    #modeToggle button {
+      border: 0;
+      background: transparent;
+      color: #fff;
+      font-size: 13px;
+      padding: 9px 12px;
+      cursor: pointer;
+    }
+    #modeToggle button.active {
+      background: #00c838;
+      color: #002a0c;
+      font-weight: 600;
+    }
+
     /* Mobile Safari/Chrome require a user gesture before camera prompts feel
        reliable, and autoplay policies are friendlier after a tap. */
     #start {
@@ -208,12 +238,17 @@
   <div id="status">Loading…</div>
   <button id="calibrateBtn" class="ctl">🎯 Calibrate gaze</button>
   <button id="recalibrateBtn" class="ctl">↻ Recalibrate</button>
+  <div id="modeToggle">
+    <button data-mode="eyes">👀 Eyes only</button>
+    <button data-mode="head" class="active">👀+🙂 Eyes + head</button>
+  </div>
   <button id="start">👁️ Tap to start eye tracking</button>
 
   <script type="module">
     import {
       FaceLandmarker,
-      FilesetResolver
+      FilesetResolver,
+      DrawingUtils
     } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
     // ---------------------------------------------------------------------
@@ -260,6 +295,8 @@
     const video    = document.getElementById("video");
     const canvas   = document.getElementById("overlay");
     const ctx      = canvas.getContext("2d");
+    const drawingUtils = new DrawingUtils(ctx);
+    const modeToggle   = document.getElementById("modeToggle");
     const statusEl = document.getElementById("status");
     const startBtn = document.getElementById("start");
     const calBtn   = document.getElementById("calibrateBtn");
@@ -276,8 +313,13 @@
     let mode = "idle";
     let latestFeature = null;   // most recent gaze feature vector
     let sampleBuf = null;       // non-null while calibration is sampling frames
-    let cal = null;             // fitted mapping {mean, std, coefX, coefY, rms}
+    let cal = null;             // fitted mapping {mean, std, coefX, coefY, rms, useHead}
     let smoothed = null;        // smoothed gaze point, normalized [0..1]
+    // Tracking mode: with head features (default), gaze = eyes + natural head
+    // movement. Eyes-only drops the head terms (feature indices 16+), for
+    // holding the device steady and pointing with the eyes alone.
+    const HEAD_START = 16;      // first head-feature index in the 22-dim vector
+    let useHeadFeatures = true;
     let lookedTile = null;      // tile currently under gaze
     let tileEls = [];
 
@@ -535,6 +577,7 @@
       mode = "calibrating";
       calBtn.classList.remove("visible");
       recalBtn.classList.remove("visible");
+      modeToggle.classList.remove("visible");
       targetsEl.classList.remove("visible");
       gazeCursor.style.display = "none";
       cal = null;
@@ -549,7 +592,8 @@
         calTarget.style.transform = ""; // let the pulse animation own transform
         calTarget.style.left = `${nx * 100}vw`;
         calTarget.style.top  = `${ny * 100}vh`;
-        setStatus(`Look at the yellow dot, then tap anywhere (${i + 1}/${CAL_POINTS.length})`);
+        const hint = useHeadFeatures ? "" : " — keep your head still";
+        setStatus(`Look at the yellow dot, then tap anywhere (${i + 1}/${CAL_POINTS.length})${hint}`);
 
         await waitForTap();
 
@@ -567,13 +611,14 @@
           await delay(1200);
           continue; // retry the same point
         }
-        for (const f of buf) samples.push({ f, t: [nx, ny] });
+        for (const f of buf)
+          samples.push({ f: useHeadFeatures ? f : f.slice(0, HEAD_START), t: [nx, ny] });
         i++;
       }
 
       calTarget.style.display = "none";
       try {
-        cal = fitMapping(samples);
+        cal = { ...fitMapping(samples), useHead: useHeadFeatures };
       } catch (err) {
         console.error("[Eyeball] Calibration fit failed:", err);
         setStatus("Calibration failed — please try again.", true);
@@ -608,13 +653,15 @@
       targetsEl.classList.add("visible");
       gazeCursor.style.display = "block";
       recalBtn.classList.add("visible");
+      modeToggle.classList.add("visible");
       const quality = cal && cal.rms < 0.06 ? "good" : "rough — consider recalibrating";
       setStatus(`Calibrated (fit: ${quality}). Look at a tile, tap ANYWHERE to select.`);
     }
 
     function updateGaze(feature) {
       if (!feature || !cal) return;
-      const b = basis(feature.map((v, i) => (v - cal.mean[i]) / cal.std[i]));
+      const f = cal.useHead ? feature : feature.slice(0, HEAD_START);
+      const b = basis(f.map((v, i) => (v - cal.mean[i]) / cal.std[i]));
       let gx = dot(b, cal.coefX);
       let gy = dot(b, cal.coefY);
       if (!Number.isFinite(gx) || !Number.isFinite(gy)) return;
@@ -725,6 +772,16 @@
           // 478 normalized 3D landmarks (x, y in [0,1]; z = relative depth).
           const landmarks = result.faceLandmarks[0];
 
+          // Wireframe face mesh while calibrating — visual confirmation that
+          // tracking is solid on every dot (and it looks great).
+          if (mode === "calibrating") {
+            drawingUtils.drawConnectors(
+              landmarks,
+              FaceLandmarker.FACE_LANDMARKS_TESSELATION,
+              { color: "rgba(0, 255, 140, 0.25)", lineWidth: 0.6 }
+            );
+          }
+
           const rightIris = landmarks[RIGHT_IRIS_CENTER];
           const leftIris  = landmarks[LEFT_IRIS_CENTER];
 
@@ -771,7 +828,8 @@
         buildTiles();
         mode = "preview";
         calBtn.classList.add("visible");
-        setStatus("Tracking… green dots = iris centers. Tap Calibrate when ready.");
+        modeToggle.classList.add("visible");
+        setStatus("Tracking… green dots = iris centers. Pick a mode, then Calibrate.");
         renderLoop();
       } catch (err) {
         // setStatus already showed a specific message; re-show the button
@@ -789,6 +847,31 @@
     recalBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       runCalibration();
+    });
+
+    // Tracking-mode toggle. Switching modes changes the feature set the
+    // regression is trained on, so an existing calibration no longer applies:
+    // drop back to preview and ask for a fresh calibration.
+    modeToggle.addEventListener("pointerdown", (e) => e.stopPropagation());
+    modeToggle.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const btn = e.target.closest("button[data-mode]");
+      if (!btn) return;
+      const wantHead = btn.dataset.mode === "head";
+      if (wantHead === useHeadFeatures) return;
+      useHeadFeatures = wantHead;
+      modeToggle.querySelectorAll("button").forEach((b) =>
+        b.classList.toggle("active", b === btn));
+      if (mode === "gaze") {
+        cal = null;
+        smoothed = null;
+        targetsEl.classList.remove("visible");
+        gazeCursor.style.display = "none";
+        recalBtn.classList.remove("visible");
+        mode = "preview";
+        calBtn.classList.add("visible");
+      }
+      setStatus(`Mode: ${wantHead ? "eyes + head" : "eyes only"} — tap Calibrate.`);
     });
   </script>
 </body>
