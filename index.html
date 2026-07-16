@@ -50,16 +50,26 @@
       z-index: 3;
       inset: 0;
       display: none;
-      grid-template-columns: 1fr 1fr;
-      grid-template-rows: 1fr 1fr 1fr;
-      gap: 3vmin;
       padding: 6vmin;
       padding-top: max(6vmin, env(safe-area-inset-top));
       padding-bottom: max(14vmin, env(safe-area-inset-bottom));
       box-sizing: border-box;
       pointer-events: none;   /* taps are handled globally: look chooses, any tap confirms */
     }
-    #targets.visible { display: grid; }
+    #targets.visible { display: block; }
+    /* In 3D mode the container becomes the camera: perspective + an origin
+       that follows the tracked head position (fish-tank VR). */
+    #targets.three-d { perspective: 900px; }
+    #scene {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr 1fr 1fr;
+      gap: 3vmin;
+      transform-style: preserve-3d;
+      will-change: transform;
+    }
     .tile {
       display: flex;
       flex-direction: column;
@@ -72,13 +82,15 @@
       color: #fff;
       font-size: 3.5vmin;
       transition: border-color 0.12s, background 0.12s, transform 0.12s;
+      /* --tz is each tile's depth in 3D mode (0 in flat mode) */
+      transform: translateZ(var(--tz, 0px));
     }
     .tile .emoji { font-size: 8vmin; }
     .tile.looked {
       border-color: #00ff44;
       background: rgba(0, 255, 68, 0.18);
       box-shadow: 0 0 24px rgba(0, 255, 68, 0.45);
-      transform: scale(1.04);
+      transform: translateZ(var(--tz, 0px)) scale(1.04);
     }
     .tile.pointed {
       border-color: #00e5ff;
@@ -86,9 +98,9 @@
     }
     .tile.activated { animation: pop 0.35s ease; }
     @keyframes pop {
-      0%   { transform: scale(1.04); background: rgba(0, 255, 68, 0.18); }
-      40%  { transform: scale(1.15); background: rgba(0, 255, 68, 0.65); }
-      100% { transform: scale(1.04); background: rgba(0, 255, 68, 0.18); }
+      0%   { transform: translateZ(var(--tz, 0px)) scale(1.04); background: rgba(0, 255, 68, 0.18); }
+      40%  { transform: translateZ(var(--tz, 0px)) scale(1.15); background: rgba(0, 255, 68, 0.65); }
+      100% { transform: translateZ(var(--tz, 0px)) scale(1.04); background: rgba(0, 255, 68, 0.18); }
     }
 
     /* ---------- Gaze cursor ---------- */
@@ -186,6 +198,16 @@
       padding: 9px 14px;
     }
     #handsBtn.on { background: #00e5ff; color: #00323a; }
+    #threeDBtn {
+      top: calc(max(18px, env(safe-area-inset-top)) + 46px);
+      bottom: auto;
+      right: 16px;
+      background: rgba(255, 255, 255, 0.85);
+      color: #000;
+      font-size: 13px;
+      padding: 9px 14px;
+    }
+    #threeDBtn.on { background: #c77dff; color: #2a0045; }
 
     /* Tracking-mode segmented toggle (eyes only vs eyes + head) */
     #modeToggle {
@@ -245,7 +267,7 @@
   <video id="video" autoplay muted playsinline webkit-playsinline></video>
   <canvas id="overlay"></canvas>
 
-  <div id="targets" aria-hidden="true"></div>
+  <div id="targets" aria-hidden="true"><div id="scene"></div></div>
   <div id="gazeCursor"></div>
   <div id="calTarget"></div>
 
@@ -253,6 +275,7 @@
   <button id="calibrateBtn" class="ctl">🎯 Calibrate gaze</button>
   <button id="recalibrateBtn" class="ctl">↻ Recalibrate</button>
   <button id="handsBtn" class="ctl">🖐 Hands</button>
+  <button id="threeDBtn" class="ctl">🧊 3D</button>
   <div id="modeToggle">
     <button data-mode="eyes">👀 Eyes only</button>
     <button data-mode="head" class="active">👀+🙂 Eyes + head</button>
@@ -314,6 +337,8 @@
     const drawingUtils = new DrawingUtils(ctx);
     const modeToggle   = document.getElementById("modeToggle");
     const handsBtn     = document.getElementById("handsBtn");
+    const threeDBtn    = document.getElementById("threeDBtn");
+    const sceneEl      = document.getElementById("scene");
     const statusEl = document.getElementById("status");
     const startBtn = document.getElementById("start");
     const calBtn   = document.getElementById("calibrateBtn");
@@ -345,6 +370,13 @@
     let handLoading = false;
     let pinched = false;        // pinch state with hysteresis
     let pointedTile = null;     // tile currently under the index fingertip
+
+    // 3D mode: tiles at staggered depths, camera coupled to the tracked head
+    // position (fish-tank VR — motion parallax without a headset).
+    const TILE_DEPTHS = [-140, 60, -40, 130, -100, 20]; // px translateZ per tile
+    let threeD = false;
+    let headSmooth = null;      // smoothed [screenX, screenY, iod]
+    let iodBaseline = null;     // head distance captured when 3D is enabled
     let lookedTile = null;      // tile currently under gaze
     let tileEls = [];
 
@@ -632,6 +664,7 @@
       recalBtn.classList.remove("visible");
       modeToggle.classList.remove("visible");
       handsBtn.classList.remove("visible");
+      threeDBtn.classList.remove("visible");
       targetsEl.classList.remove("visible");
       gazeCursor.style.display = "none";
       cal = null;
@@ -680,6 +713,7 @@
         calBtn.classList.add("visible");
         modeToggle.classList.add("visible");
         handsBtn.classList.add("visible");
+        threeDBtn.classList.add("visible");
         return;
       }
       console.log(
@@ -693,15 +727,41 @@
 
     // --------------------------- LOOK & TAP ---------------------------
     function buildTiles() {
-      targetsEl.innerHTML = "";
+      sceneEl.innerHTML = "";
       tileEls = TILES.map(([emoji, label]) => {
         const el = document.createElement("div");
         el.className = "tile";
         el.innerHTML = `<span class="emoji">${emoji}</span><span>${label}</span>`;
         el.dataset.label = label;
-        targetsEl.appendChild(el);
+        sceneEl.appendChild(el);
         return el;
       });
+    }
+
+    // Head-coupled perspective: the scene rotates and scales opposite to the
+    // tracked head, so tiles at different depths shift against each other —
+    // real motion parallax through a virtual window.
+    function updateParallax(lm) {
+      if (!threeD) return;
+      const nose = lm[NOSE_TIP];
+      const outerR = lm[33], outerL = lm[263];
+      const iod = Math.hypot(outerL.x - outerR.x, outerL.y - outerR.y);
+      const sx = 1 - nose.x; // mirror-aware: screen-space head position
+      const sy = nose.y;
+
+      headSmooth = headSmooth
+        ? headSmooth.map((v, i) => v + ([sx, sy, iod][i] - v) * 0.25)
+        : [sx, sy, iod];
+      if (!iodBaseline) iodBaseline = headSmooth[2];
+
+      const ry = Math.max(-18, Math.min(18, (headSmooth[0] - 0.5) * 40));
+      const rx = Math.max(-18, Math.min(18, -(headSmooth[1] - 0.5) * 40));
+      // Lean in → scene comes closer; lean back → recedes.
+      const s = Math.max(0.8, Math.min(1.35, 1 + (headSmooth[2] / iodBaseline - 1) * 2.5));
+
+      targetsEl.style.perspectiveOrigin =
+        `${headSmooth[0] * 100}% ${headSmooth[1] * 100}%`;
+      sceneEl.style.transform = `rotateX(${rx.toFixed(2)}deg) rotateY(${ry.toFixed(2)}deg) scale(${s.toFixed(3)})`;
     }
 
     function enterGazeMode() {
@@ -711,6 +771,7 @@
       recalBtn.classList.add("visible");
       modeToggle.classList.add("visible");
       handsBtn.classList.add("visible");
+      threeDBtn.classList.add("visible");
       const quality = cal && cal.rms < 0.06 ? "good" : "rough — consider recalibrating";
       setStatus(`Calibrated (fit: ${quality}). Look at a tile, tap ANYWHERE to select.`);
     }
@@ -860,6 +921,8 @@
           drawIrisDot(rightIris, RIGHT_IRIS_RING, landmarks);
           drawIrisDot(leftIris,  LEFT_IRIS_RING,  landmarks);
 
+          updateParallax(landmarks);
+
           const feature = computeGazeFeature(
             landmarks,
             result.faceBlendshapes?.[0]?.categories
@@ -956,6 +1019,7 @@
         calBtn.classList.add("visible");
         modeToggle.classList.add("visible");
         handsBtn.classList.add("visible");
+        threeDBtn.classList.add("visible");
         setStatus("Tracking… green dots = iris centers. Pick a mode, then Calibrate.");
         renderLoop();
       } catch (err) {
@@ -1031,6 +1095,29 @@
         pointedTile = null;
         if (mode !== "gaze") targetsEl.classList.remove("visible");
         setStatus("Hands off.");
+      }
+    });
+
+    // 3D mode toggle: stagger tile depths and start head-coupled parallax.
+    threeDBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+    threeDBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      threeD = !threeD;
+      threeDBtn.classList.toggle("on", threeD);
+      targetsEl.classList.toggle("three-d", threeD);
+      if (threeD) {
+        tileEls.forEach((el, i) =>
+          el.style.setProperty("--tz", `${TILE_DEPTHS[i % TILE_DEPTHS.length]}px`));
+        headSmooth = null;
+        iodBaseline = null; // re-baseline "how far away is the user" on enable
+        targetsEl.classList.add("visible");
+        setStatus("3D on — move your head to look around the tiles.");
+      } else {
+        tileEls.forEach((el) => el.style.removeProperty("--tz"));
+        targetsEl.style.perspectiveOrigin = "";
+        sceneEl.style.transform = "";
+        if (mode !== "gaze" && !handsOn) targetsEl.classList.remove("visible");
+        setStatus("3D off.");
       }
     });
   </script>
