@@ -36,7 +36,11 @@ No build step, no native app, no Xcode — just one `index.html`.
    The viewer's eye position (perspective-origin) follows your tracked
    head, approximating an off-axis projection: the scene never rotates,
    just like a real window — near and far geometry shift against each
-   other as you move, and **leaning in dollies you into the room**. Gaze,
+   other as you move, and **leaning in dollies you into the room**.
+   Head position comes from the facial transformation matrix's
+   *translation* component (rotation factored out, ~cm units), so
+   **turning your head in place doesn't move the scene** — only actually
+   moving it (left/right/up/down/closer/farther) does. Gaze,
    touch, and pinch selection all still work — hit-testing uses the
    projected on-screen tile positions.
 10. **Look and Tap**: after calibrating, a green gaze cursor follows your eyes

@@ -424,8 +424,8 @@
     // plane), camera coupled to the tracked head — a window into a 3D scene.
     const TILE_DEPTHS = [-320, -80, -180, -40, -260, -120]; // px translateZ per tile
     let threeD = false;
-    let headSmooth = null;      // smoothed [screenX, screenY, iod]
-    let iodBaseline = null;     // head distance captured when 3D is enabled
+    let headSmooth = null;      // smoothed head position [x, y, dist] (~cm)
+    let headBaseline = null;    // resting head position captured on 3D enable
     let lookedTile = null;      // tile currently under gaze
     let tileEls = [];
 
@@ -469,7 +469,10 @@
           // Blendshapes include eyeLookIn/Out/Up/Down — the model's own
           // learned gaze signals, stronger vertically than raw iris geometry.
           outputFaceBlendshapes: true,
-          outputFacialTransformationMatrixes: false
+          // The transformation matrix separates head ROTATION from head
+          // TRANSLATION — 3D window mode uses only the translation, so
+          // turning your head in place doesn't shift the scene.
+          outputFacialTransformationMatrixes: true
         };
 
         try {
@@ -789,31 +792,49 @@
 
     // Head-coupled window: the scene is NEVER rotated — a real window doesn't
     // turn to face you. Only the perspective-origin (the viewer's eye
-    // position) follows the tracked head, which approximates an off-axis
-    // projection: near and far geometry shift against each other exactly as
-    // through a physical window. Leaning in dollies the whole room closer.
-    function updateParallax(lm) {
+    // position) follows the tracked head, approximating an off-axis
+    // projection. Crucially, the head position comes from the facial
+    // transformation matrix's TRANSLATION component (~cm, rotation factored
+    // out) — so turning your head in place does NOT move the scene; only
+    // actually moving your head (left/right/up/down/closer/farther) does.
+    function updateParallax(lm, mat) {
       if (!threeD) return;
-      const nose = lm[NOSE_TIP];
-      const outerR = lm[33], outerL = lm[263];
-      const iod = Math.hypot(outerL.x - outerR.x, outerL.y - outerR.y);
-      const sx = 1 - nose.x; // mirror-aware: screen-space head position
-      const sy = nose.y;
+
+      let hx, hy, dist;
+      if (mat && mat.length === 16) {
+        // Column-major 4x4; translation at [12..14] in camera space:
+        // X = image-right, Y = up, Z = toward camera (face at negative Z).
+        // Map to CSS screen space (mirrored display, y-down):
+        hx = -mat[12]; // user moves right → image-left → CSS-right: negate
+        hy = -mat[13]; // Y-up → CSS y-down: negate
+        dist = Math.abs(mat[14]);
+      } else {
+        // Fallback if the matrix is unavailable: nose position (rotation-
+        // sensitive, but better than nothing).
+        const nose = lm[NOSE_TIP];
+        hx = (1 - nose.x) * 30;
+        hy = nose.y * 30;
+        const outerR = lm[33], outerL = lm[263];
+        dist = 5 / Math.max(1e-6,
+          Math.hypot(outerL.x - outerR.x, outerL.y - outerR.y));
+      }
 
       headSmooth = headSmooth
-        ? headSmooth.map((v, i) => v + ([sx, sy, iod][i] - v) * 0.25)
-        : [sx, sy, iod];
-      if (!iodBaseline) iodBaseline = headSmooth[2];
+        ? headSmooth.map((v, i) => v + ([hx, hy, dist][i] - v) * 0.25)
+        : [hx, hy, dist];
+      if (!headBaseline) headBaseline = [...headSmooth];
 
-      // Amplified eye position: head movement is small relative to screen
-      // size, so scale it up for a strong look-around effect.
-      const ox = 50 + (headSmooth[0] - 0.5) * 220;
-      const oy = 50 + (headSmooth[1] - 0.5) * 220;
+      // ~4% of perspective-origin travel per cm of real head movement.
+      const K = 4.0;
+      const ox = Math.max(-60, Math.min(160,
+        50 + (headSmooth[0] - headBaseline[0]) * K));
+      const oy = Math.max(-60, Math.min(160,
+        50 + (headSmooth[1] - headBaseline[1]) * K));
       targetsEl.style.perspectiveOrigin = `${ox.toFixed(1)}% ${oy.toFixed(1)}%`;
 
-      // Lean in → dolly into the room; lean back → retreat to the window.
+      // Lean in → dolly into the room (~12px per cm); lean back → retreat.
       const dz = Math.max(-180, Math.min(320,
-        (headSmooth[2] / iodBaseline - 1) * 900));
+        (headBaseline[2] - headSmooth[2]) * 12));
       const dolly = `translateZ(${dz.toFixed(1)}px)`;
       sceneEl.style.transform = dolly;
       roomEl.style.transform = dolly;
@@ -976,7 +997,7 @@
           drawIrisDot(rightIris, RIGHT_IRIS_RING, landmarks);
           drawIrisDot(leftIris,  LEFT_IRIS_RING,  landmarks);
 
-          updateParallax(landmarks);
+          updateParallax(landmarks, result.facialTransformationMatrixes?.[0]?.data);
 
           const feature = computeGazeFeature(
             landmarks,
@@ -1164,7 +1185,7 @@
         tileEls.forEach((el, i) =>
           el.style.setProperty("--tz", `${TILE_DEPTHS[i % TILE_DEPTHS.length]}px`));
         headSmooth = null;
-        iodBaseline = null; // re-baseline "how far away is the user" on enable
+        headBaseline = null; // re-baseline the resting head position on enable
         targetsEl.classList.add("visible");
         setStatus("3D on — a window into a room. Move your head; lean in to enter.");
       } else {
