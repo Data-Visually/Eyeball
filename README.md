@@ -30,19 +30,25 @@ No build step, no native app, no Xcode — just one `index.html`.
    and a **thumb-index pinch selects** the tile under it — with hysteresis so
    the pinch doesn't flicker, and hand-size normalization so it works at any
    distance. Works with or without gaze calibration, alongside look-and-tap.
-9. **3D window mode** (🧊 toggle): the screen becomes a **window into a
-   600px-deep room** — grid-textured walls, floor, and ceiling receding
-   behind the glass, with the tiles floating inside at staggered depths.
-   The viewer's eye position (perspective-origin) follows your tracked
-   head, approximating an off-axis projection: the scene never rotates,
-   just like a real window — near and far geometry shift against each
-   other as you move, and **leaning in dollies you into the room**.
-   Head position comes from the facial transformation matrix's
-   *translation* component (rotation factored out, ~cm units), so
-   **turning your head in place doesn't move the scene** — only actually
-   moving it (left/right/up/down/closer/farther) does. Gaze,
-   touch, and pinch selection all still work — hit-testing uses the
-   projected on-screen tile positions.
+9. **3D window mode** (🧊 toggle): the screen becomes a **window into a deep
+   corridor** — grid-textured walls plus nested depth rings receding into the
+   distance, with the app tiles floating inside at staggered depths. The
+   viewer's eye position (perspective-origin) follows your head, approximating
+   an off-axis projection: the scene never rotates, just like a real window —
+   near and far geometry shift against each other as you move, and **leaning
+   in dollies you down the corridor**. Gaze, touch, and pinch selection all
+   still work; hit-testing uses the projected on-screen tile positions.
+   - **Neck-pivot tracking**: the reference point is the *neck pivot* (top of
+     the neck, under the chin), computed from the facial transformation
+     matrix as `R·offset + translation`. Because your head physically rotates
+     about this pivot, its position is invariant to head rotation — so
+     **turning your head in place produces zero scene movement**; only
+     translating your body (which moves the pivot) shifts the view.
+   - **⚙️ Tune panel**: live sliders for the neck-pivot offset (down/back —
+     dial these until head turns produce no drift), parallax gain, dolly gain,
+     smoothing, and corridor depth, plus a **Tiles on/off sandbox** for a pure
+     corridor to experiment in and a **Re-center** button. A readout shows the
+     live tracked position.
 10. **Look and Tap**: after calibrating, a green gaze cursor follows your eyes
    across a grid of app tiles. The tile you're looking at lights up; tapping
    **anywhere** on the screen selects it (with haptic feedback where

@@ -71,44 +71,55 @@
       will-change: transform;
     }
 
-    /* ---------- The room (window-into-a-3D-scene, 3D mode only) ----------
-       A 600px-deep box built from wall planes with grid textures. The scene
-       is NEVER rotated — only the perspective-origin moves with your head,
-       which is the CSS approximation of an off-axis projection: exactly how
-       a real window behaves. */
+    /* ---------- The corridor (window-into-a-3D-scene) ----------
+       A deep tunnel of grid-textured wall planes plus depth rings. The scene
+       is NEVER rotated — only the perspective-origin moves with the viewer's
+       tracked eye position, the CSS form of an off-axis projection: exactly
+       how a real window behaves. Corridor depth is the --depth custom
+       property, live-tunable from the settings panel. */
     #room {
       position: absolute;
       inset: 0;
+      --depth: 2200px;
       display: none;
       transform-style: preserve-3d;
       will-change: transform;
       pointer-events: none;
     }
     #targets.three-d #room { display: block; }
-    .face {
+    .wall {
       position: absolute;
       background:
         repeating-linear-gradient(0deg,
-          rgba(0, 255, 140, 0.16) 0 1px, transparent 1px 60px),
+          rgba(0, 255, 140, 0.14) 0 1px, transparent 1px 64px),
         repeating-linear-gradient(90deg,
-          rgba(0, 255, 140, 0.16) 0 1px, transparent 1px 60px),
-        rgba(0, 20, 8, 0.25);
+          rgba(0, 255, 140, 0.14) 0 1px, transparent 1px 64px),
+        rgba(0, 18, 8, 0.30);
     }
-    .face.back {
+    .wall.back {
       inset: 0;
-      transform: translateZ(-600px);
+      transform: translateZ(calc(-1 * var(--depth)));
       background:
-        radial-gradient(circle at 50% 50%, rgba(0, 255, 140, 0.10), transparent 70%),
+        radial-gradient(circle at 50% 45%, rgba(0, 255, 140, 0.18), transparent 65%),
         repeating-linear-gradient(0deg,
-          rgba(0, 255, 140, 0.20) 0 1px, transparent 1px 60px),
+          rgba(0, 255, 140, 0.22) 0 1px, transparent 1px 64px),
         repeating-linear-gradient(90deg,
-          rgba(0, 255, 140, 0.20) 0 1px, transparent 1px 60px),
-        rgba(0, 12, 5, 0.45);
+          rgba(0, 255, 140, 0.22) 0 1px, transparent 1px 64px),
+        rgba(0, 10, 5, 0.55);
     }
-    .face.left   { top: 0; bottom: 0; left: 0;  width: 600px;  transform-origin: left center;   transform: rotateY(90deg); }
-    .face.right  { top: 0; bottom: 0; right: 0; width: 600px;  transform-origin: right center;  transform: rotateY(-90deg); }
-    .face.top    { left: 0; right: 0; top: 0;    height: 600px; transform-origin: center top;    transform: rotateX(-90deg); }
-    .face.bottom { left: 0; right: 0; bottom: 0; height: 600px; transform-origin: center bottom; transform: rotateX(90deg); }
+    .wall.left   { top: 0; bottom: 0; left: 0;  width: var(--depth);  transform-origin: left center;   transform: rotateY(90deg); }
+    .wall.right  { top: 0; bottom: 0; right: 0; width: var(--depth);  transform-origin: right center;  transform: rotateY(-90deg); }
+    .wall.ceil   { left: 0; right: 0; top: 0;    height: var(--depth); transform-origin: center top;    transform: rotateX(-90deg); }
+    .wall.floor  { left: 0; right: 0; bottom: 0; height: var(--depth); transform-origin: center bottom; transform: rotateX(90deg); }
+    #rings { position: absolute; inset: 0; transform-style: preserve-3d; }
+    .ring {
+      position: absolute;
+      inset: 0;
+      border: 2px solid rgba(0, 255, 140, 0.30);
+      box-shadow: inset 0 0 30px rgba(0, 255, 140, 0.10);
+    }
+    /* Sandbox: hide the app tiles, leaving a pure corridor to tune against. */
+    #targets.sandbox #scene { display: none; }
     .tile {
       display: flex;
       flex-direction: column;
@@ -247,6 +258,48 @@
       padding: 9px 14px;
     }
     #threeDBtn.on { background: #c77dff; color: #2a0045; }
+    #settingsBtn {
+      top: calc(max(18px, env(safe-area-inset-top)) + 92px);
+      bottom: auto;
+      right: 16px;
+      background: rgba(255, 255, 255, 0.85);
+      color: #000;
+      font-size: 13px;
+      padding: 9px 14px;
+    }
+    #settingsBtn.on { background: #00e58c; color: #00281a; }
+
+    /* ---------- Window tuning panel ---------- */
+    #settings {
+      position: fixed;
+      z-index: 7;
+      left: 16px;
+      top: max(18px, env(safe-area-inset-top));
+      width: 210px;
+      max-width: 62vw;
+      padding: 12px 14px;
+      border-radius: 14px;
+      background: rgba(0, 0, 0, 0.72);
+      border: 1px solid rgba(0, 255, 140, 0.3);
+      color: #cfffe6;
+      font-size: 12px;
+      display: none;
+    }
+    #settings.visible { display: block; }
+    #settings h4 { margin: 0 0 6px; font-size: 12px; color: #8affc4; letter-spacing: 0.05em; }
+    #settings label { display: flex; justify-content: space-between; margin: 9px 0 2px; }
+    #settings label span:last-child { color: #fff; font-variant-numeric: tabular-nums; }
+    #settings input[type=range] { width: 100%; accent-color: #00e58c; margin: 0; }
+    #settings .row { display: flex; gap: 8px; margin-top: 11px; }
+    #settings .row button {
+      flex: 1; border: 0; border-radius: 8px; padding: 7px 8px;
+      background: rgba(0, 229, 140, 0.2); color: #cfffe6; font-size: 12px; cursor: pointer;
+    }
+    #settings .row button.active { background: #00e58c; color: #00281a; font-weight: 600; }
+    #readout {
+      margin-top: 10px; font-family: ui-monospace, monospace; font-size: 11px;
+      color: #7fffce; white-space: pre; line-height: 1.5;
+    }
 
     /* Tracking-mode segmented toggle (eyes only vs eyes + head) */
     #modeToggle {
@@ -308,11 +361,12 @@
 
   <div id="targets" aria-hidden="true">
     <div id="room">
-      <div class="face back"></div>
-      <div class="face left"></div>
-      <div class="face right"></div>
-      <div class="face top"></div>
-      <div class="face bottom"></div>
+      <div class="wall back"></div>
+      <div class="wall left"></div>
+      <div class="wall right"></div>
+      <div class="wall ceil"></div>
+      <div class="wall floor"></div>
+      <div id="rings"></div>
     </div>
     <div id="scene"></div>
   </div>
@@ -324,6 +378,27 @@
   <button id="recalibrateBtn" class="ctl">↻ Recalibrate</button>
   <button id="handsBtn" class="ctl">🖐 Hands</button>
   <button id="threeDBtn" class="ctl">🧊 3D</button>
+  <button id="settingsBtn" class="ctl">⚙️ Tune</button>
+  <div id="settings">
+    <h4>🎛 WINDOW TUNING</h4>
+    <label>Pivot down <span id="v_pivotDown"></span></label>
+    <input type="range" id="s_pivotDown" min="0" max="20" step="0.5" />
+    <label>Pivot back <span id="v_pivotBack"></span></label>
+    <input type="range" id="s_pivotBack" min="0" max="25" step="0.5" />
+    <label>Parallax <span id="v_parallax"></span></label>
+    <input type="range" id="s_parallax" min="0" max="12" step="0.5" />
+    <label>Dolly <span id="v_dolly"></span></label>
+    <input type="range" id="s_dolly" min="0" max="40" step="1" />
+    <label>Smoothing <span id="v_smooth"></span></label>
+    <input type="range" id="s_smooth" min="0.05" max="1" step="0.05" />
+    <label>Corridor depth <span id="v_depth"></span></label>
+    <input type="range" id="s_depth" min="600" max="4000" step="100" />
+    <div class="row">
+      <button id="tilesToggle">Tiles: on</button>
+      <button id="recenterBtn">Re-center</button>
+    </div>
+    <div id="readout"></div>
+  </div>
   <div id="modeToggle">
     <button data-mode="eyes">👀 Eyes only</button>
     <button data-mode="head" class="active">👀+🙂 Eyes + head</button>
@@ -388,6 +463,11 @@
     const threeDBtn    = document.getElementById("threeDBtn");
     const sceneEl      = document.getElementById("scene");
     const roomEl       = document.getElementById("room");
+    const settingsBtn  = document.getElementById("settingsBtn");
+    const settingsPanel = document.getElementById("settings");
+    const readoutEl    = document.getElementById("readout");
+    const tilesToggleBtn = document.getElementById("tilesToggle");
+    const recenterBtn  = document.getElementById("recenterBtn");
     const statusEl = document.getElementById("status");
     const startBtn = document.getElementById("start");
     const calBtn   = document.getElementById("calibrateBtn");
@@ -420,12 +500,26 @@
     let pinched = false;        // pinch state with hysteresis
     let pointedTile = null;     // tile currently under the index fingertip
 
-    // 3D mode: tiles float INSIDE the room (all depths behind the screen
-    // plane), camera coupled to the tracked head — a window into a 3D scene.
+    // 3D mode: tiles float INSIDE the corridor (all depths behind the screen
+    // plane), camera coupled to the viewer's tracked eye — a window into a
+    // 3D scene.
     const TILE_DEPTHS = [-320, -80, -180, -40, -260, -120]; // px translateZ per tile
     let threeD = false;
-    let headSmooth = null;      // smoothed head position [x, y, dist] (~cm)
-    let headBaseline = null;    // resting head position captured on 3D enable
+    let headSmooth = null;      // smoothed eye/pivot position [x, y, dist] (~cm)
+    let headBaseline = null;    // resting position captured on 3D enable / re-center
+
+    // Live-tunable window parameters (settings panel). pivotDown / pivotBack
+    // locate the neck rotation pivot relative to the face centre — tune them
+    // until turning your head in place produces ZERO scene movement.
+    const params = {
+      pivotDown: 8,   // cm below face centre to the neck pivot
+      pivotBack: 10,  // cm behind face centre to the neck pivot
+      parallax: 4.0,  // perspective-origin % per cm of movement
+      dolly: 12,      // px dolly per cm of movement
+      smooth: 0.25,   // EMA factor (lower = steadier, higher = snappier)
+      depth: 2200,    // corridor depth (px)
+      showTiles: true
+    };
     let lookedTile = null;      // tile currently under gaze
     let tileEls = [];
 
@@ -793,21 +887,33 @@
     // Head-coupled window: the scene is NEVER rotated — a real window doesn't
     // turn to face you. Only the perspective-origin (the viewer's eye
     // position) follows the tracked head, approximating an off-axis
-    // projection. Crucially, the head position comes from the facial
-    // transformation matrix's TRANSLATION component (~cm, rotation factored
-    // out) — so turning your head in place does NOT move the scene; only
-    // actually moving your head (left/right/up/down/closer/farther) does.
+    // projection.
+    //
+    // The reference point is the NECK PIVOT (top of the neck, under the chin),
+    // NOT the face centre. The facial transformation matrix gives the face
+    // centre's pose [R | t]; the neck pivot sits at a fixed head-local offset
+    // p = (0, -down, -back) from it, so its camera-space position is
+    //   pivot = R·p + t.
+    // Because the head physically rotates ABOUT this pivot, R and t change
+    // together to keep R·p + t constant under pure rotation — so turning your
+    // head in place does NOT move the scene. Only translating your body (which
+    // moves the pivot) shifts it. Tune pivotDown/pivotBack until head turns
+    // produce zero drift.
     function updateParallax(lm, mat) {
       if (!threeD) return;
 
       let hx, hy, dist;
       if (mat && mat.length === 16) {
-        // Column-major 4x4; translation at [12..14] in camera space:
-        // X = image-right, Y = up, Z = toward camera (face at negative Z).
-        // Map to CSS screen space (mirrored display, y-down):
-        hx = -mat[12]; // user moves right → image-left → CSS-right: negate
-        hy = -mat[13]; // Y-up → CSS y-down: negate
-        dist = Math.abs(mat[14]);
+        // Column-major 4x4: rotation in columns 0-2, translation in column 3.
+        // Head-local offset to the neck pivot: down = -Y, back = -Z.
+        const px = 0, py = -params.pivotDown, pz = -params.pivotBack;
+        const rx = mat[0] * px + mat[4] * py + mat[8]  * pz;
+        const ry = mat[1] * px + mat[5] * py + mat[9]  * pz;
+        const rz = mat[2] * px + mat[6] * py + mat[10] * pz;
+        const cx = mat[12] + rx, cy = mat[13] + ry, cz = mat[14] + rz;
+        hx = -cx;             // mirrored display: user-right → CSS-right
+        hy = -cy;             // camera Y-up → CSS y-down
+        dist = Math.abs(cz);
       } else {
         // Fallback if the matrix is unavailable: nose position (rotation-
         // sensitive, but better than nothing).
@@ -819,25 +925,44 @@
           Math.hypot(outerL.x - outerR.x, outerL.y - outerR.y));
       }
 
+      const a = params.smooth;
       headSmooth = headSmooth
-        ? headSmooth.map((v, i) => v + ([hx, hy, dist][i] - v) * 0.25)
+        ? headSmooth.map((v, i) => v + ([hx, hy, dist][i] - v) * a)
         : [hx, hy, dist];
       if (!headBaseline) headBaseline = [...headSmooth];
 
-      // ~4% of perspective-origin travel per cm of real head movement.
-      const K = 4.0;
-      const ox = Math.max(-60, Math.min(160,
-        50 + (headSmooth[0] - headBaseline[0]) * K));
-      const oy = Math.max(-60, Math.min(160,
-        50 + (headSmooth[1] - headBaseline[1]) * K));
+      const ox = Math.max(-80, Math.min(180,
+        50 + (headSmooth[0] - headBaseline[0]) * params.parallax));
+      const oy = Math.max(-80, Math.min(180,
+        50 + (headSmooth[1] - headBaseline[1]) * params.parallax));
       targetsEl.style.perspectiveOrigin = `${ox.toFixed(1)}% ${oy.toFixed(1)}%`;
 
-      // Lean in → dolly into the room (~12px per cm); lean back → retreat.
-      const dz = Math.max(-180, Math.min(320,
-        (headBaseline[2] - headSmooth[2]) * 12));
+      // Lean in → dolly into the corridor; lean back → retreat to the window.
+      const dz = Math.max(-220, Math.min(600,
+        (headBaseline[2] - headSmooth[2]) * params.dolly));
       const dolly = `translateZ(${dz.toFixed(1)}px)`;
       sceneEl.style.transform = dolly;
       roomEl.style.transform = dolly;
+
+      if (settingsPanel.classList.contains("visible")) {
+        readoutEl.textContent =
+          `pivot x ${headSmooth[0].toFixed(1)}  y ${headSmooth[1].toFixed(1)}\n` +
+          `dist  ${headSmooth[2].toFixed(1)}   origin ${ox.toFixed(0)}% ${oy.toFixed(0)}%`;
+      }
+    }
+
+    // Depth rings — nested frames receding down the corridor for strong
+    // parallax/tunnel cues. Regenerated when the depth slider changes.
+    function buildRings() {
+      const ringsEl = document.getElementById("rings");
+      ringsEl.innerHTML = "";
+      const n = 9;
+      for (let i = 1; i <= n; i++) {
+        const r = document.createElement("div");
+        r.className = "ring";
+        r.style.transform = `translateZ(${(-params.depth * i / n).toFixed(0)}px)`;
+        ringsEl.appendChild(r);
+      }
     }
 
     function enterGazeMode() {
@@ -1174,7 +1299,8 @@
       }
     });
 
-    // 3D mode toggle: stagger tile depths and start head-coupled parallax.
+    // 3D mode toggle: build the corridor, stagger tile depths, start the
+    // head-coupled parallax, and reveal the tuning controls.
     threeDBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
     threeDBtn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1182,20 +1308,73 @@
       threeDBtn.classList.toggle("on", threeD);
       targetsEl.classList.toggle("three-d", threeD);
       if (threeD) {
+        roomEl.style.setProperty("--depth", `${params.depth}px`);
+        buildRings();
+        targetsEl.classList.toggle("sandbox", !params.showTiles);
         tileEls.forEach((el, i) =>
           el.style.setProperty("--tz", `${TILE_DEPTHS[i % TILE_DEPTHS.length]}px`));
         headSmooth = null;
-        headBaseline = null; // re-baseline the resting head position on enable
+        headBaseline = null; // capture the resting position on enable
         targetsEl.classList.add("visible");
-        setStatus("3D on — a window into a room. Move your head; lean in to enter.");
+        settingsBtn.classList.add("visible");
+        refreshSettingsUI();
+        setStatus("3D on — window into a corridor. Tap ⚙️ Tune to tweak it.");
       } else {
         tileEls.forEach((el) => el.style.removeProperty("--tz"));
         targetsEl.style.perspectiveOrigin = "";
         sceneEl.style.transform = "";
         roomEl.style.transform = "";
+        targetsEl.classList.remove("sandbox");
+        settingsBtn.classList.remove("visible", "on");
+        settingsPanel.classList.remove("visible");
         if (mode !== "gaze" && !handsOn) targetsEl.classList.remove("visible");
         setStatus("3D off.");
       }
+    });
+
+    // ---- Window tuning panel ----
+    const SLIDERS = ["pivotDown", "pivotBack", "parallax", "dolly", "smooth", "depth"];
+    function refreshSettingsUI() {
+      for (const k of SLIDERS) {
+        document.getElementById("s_" + k).value = params[k];
+        const unit = k === "depth" ? "px"
+          : (k === "pivotDown" || k === "pivotBack") ? " cm" : "";
+        document.getElementById("v_" + k).textContent = params[k] + unit;
+      }
+      tilesToggleBtn.textContent = "Tiles: " + (params.showTiles ? "on" : "off");
+      tilesToggleBtn.classList.toggle("active", params.showTiles);
+    }
+    for (const k of SLIDERS) {
+      const el = document.getElementById("s_" + k);
+      el.addEventListener("pointerdown", (e) => e.stopPropagation());
+      el.addEventListener("input", () => {
+        params[k] = parseFloat(el.value);
+        if (k === "depth") {
+          roomEl.style.setProperty("--depth", `${params.depth}px`);
+          buildRings();
+        }
+        refreshSettingsUI();
+      });
+    }
+    settingsBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+    settingsBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const show = !settingsPanel.classList.contains("visible");
+      settingsPanel.classList.toggle("visible", show);
+      settingsBtn.classList.toggle("on", show);
+    });
+    tilesToggleBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+    tilesToggleBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      params.showTiles = !params.showTiles;
+      targetsEl.classList.toggle("sandbox", !params.showTiles);
+      refreshSettingsUI();
+    });
+    recenterBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+    recenterBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      headBaseline = null; // recapture on the next frame
+      setStatus("Re-centered on your current position.");
     });
   </script>
 </body>
