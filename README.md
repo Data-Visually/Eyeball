@@ -24,7 +24,13 @@ No build step, no native app, no Xcode — just one `index.html`.
 7. **Gaze calibration**: a 9-point routine — look at each yellow dot and tap;
    the app samples your iris-vs-eye-corner geometry for ~1 s per dot and fits
    a quadratic regression from gaze features to screen coordinates.
-8. **Look and Tap**: after calibrating, a green gaze cursor follows your eyes
+8. **Hand tracking** (🖐 toggle, top-right): lazy-loads MediaPipe's Hand
+   Landmarker (21 landmarks per hand, up to two hands) and draws live cyan
+   hand skeletons. Your **index fingertip becomes a pointer** (cyan ring),
+   and a **thumb-index pinch selects** the tile under it — with hysteresis so
+   the pinch doesn't flicker, and hand-size normalization so it works at any
+   distance. Works with or without gaze calibration, alongside look-and-tap.
+9. **Look and Tap**: after calibrating, a green gaze cursor follows your eyes
    across a grid of app tiles. The tile you're looking at lights up; tapping
    **anywhere** on the screen selects it (with haptic feedback where
    supported). Look chooses, tap confirms.

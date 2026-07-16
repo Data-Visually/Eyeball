@@ -80,6 +80,10 @@
       box-shadow: 0 0 24px rgba(0, 255, 68, 0.45);
       transform: scale(1.04);
     }
+    .tile.pointed {
+      border-color: #00e5ff;
+      box-shadow: 0 0 24px rgba(0, 229, 255, 0.45);
+    }
     .tile.activated { animation: pop 0.35s ease; }
     @keyframes pop {
       0%   { transform: scale(1.04); background: rgba(0, 255, 68, 0.18); }
@@ -172,6 +176,16 @@
     .ctl.visible { display: block; }
     #calibrateBtn   { left: 50%; transform: translateX(-50%); }
     #recalibrateBtn { right: 16px; background: rgba(255, 255, 255, 0.85); color: #000; font-size: 13px; padding: 9px 14px; }
+    #handsBtn {
+      top: max(18px, env(safe-area-inset-top));
+      bottom: auto;
+      right: 16px;
+      background: rgba(255, 255, 255, 0.85);
+      color: #000;
+      font-size: 13px;
+      padding: 9px 14px;
+    }
+    #handsBtn.on { background: #00e5ff; color: #00323a; }
 
     /* Tracking-mode segmented toggle (eyes only vs eyes + head) */
     #modeToggle {
@@ -238,6 +252,7 @@
   <div id="status">Loading…</div>
   <button id="calibrateBtn" class="ctl">🎯 Calibrate gaze</button>
   <button id="recalibrateBtn" class="ctl">↻ Recalibrate</button>
+  <button id="handsBtn" class="ctl">🖐 Hands</button>
   <div id="modeToggle">
     <button data-mode="eyes">👀 Eyes only</button>
     <button data-mode="head" class="active">👀+🙂 Eyes + head</button>
@@ -247,6 +262,7 @@
   <script type="module">
     import {
       FaceLandmarker,
+      HandLandmarker,
       FilesetResolver,
       DrawingUtils
     } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
@@ -297,6 +313,7 @@
     const ctx      = canvas.getContext("2d");
     const drawingUtils = new DrawingUtils(ctx);
     const modeToggle   = document.getElementById("modeToggle");
+    const handsBtn     = document.getElementById("handsBtn");
     const statusEl = document.getElementById("status");
     const startBtn = document.getElementById("start");
     const calBtn   = document.getElementById("calibrateBtn");
@@ -320,6 +337,14 @@
     // holding the device steady and pointing with the eyes alone.
     const HEAD_START = 16;      // first head-feature index in the 22-dim vector
     let useHeadFeatures = true;
+
+    // Hand tracking (lazy-loaded on first toggle). 21 landmarks per hand:
+    // 0 = wrist, 4 = thumb tip, 8 = index tip, 9 = middle-finger base.
+    let handLandmarker = null;
+    let handsOn = false;
+    let handLoading = false;
+    let pinched = false;        // pinch state with hysteresis
+    let pointedTile = null;     // tile currently under the index fingertip
     let lookedTile = null;      // tile currently under gaze
     let tileEls = [];
 
@@ -333,12 +358,20 @@
     const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
     // ------------------------- MEDIAPIPE SETUP -------------------------
+    let visionFileset = null;
+    async function getVision() {
+      if (!visionFileset) {
+        visionFileset = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+        );
+      }
+      return visionFileset;
+    }
+
     async function createFaceLandmarker() {
       setStatus("Loading MediaPipe Face Landmarker model…");
       try {
-        const filesetResolver = await FilesetResolver.forVisionTasks(
-          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
-        );
+        const filesetResolver = await getVision();
 
         // NOTE: In the JS tasks-vision API the running modes are "IMAGE" and
         // "VIDEO". "VIDEO" + detectForVideo() per frame IS the live-stream
@@ -372,6 +405,26 @@
         setStatus("Failed to load Face Landmarker model. Check network/CDN access.", true);
         console.error("[Eyeball] Model init error:", err);
         throw err;
+      }
+    }
+
+    async function createHandLandmarker() {
+      const options = {
+        baseOptions: {
+          modelAssetPath:
+            "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+          delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numHands: 2
+      };
+      const filesetResolver = await getVision();
+      try {
+        return await HandLandmarker.createFromOptions(filesetResolver, options);
+      } catch (gpuErr) {
+        console.warn("[Eyeball] Hand GPU delegate failed, retrying with CPU:", gpuErr);
+        options.baseOptions.delegate = "CPU";
+        return await HandLandmarker.createFromOptions(filesetResolver, options);
       }
     }
 
@@ -578,6 +631,7 @@
       calBtn.classList.remove("visible");
       recalBtn.classList.remove("visible");
       modeToggle.classList.remove("visible");
+      handsBtn.classList.remove("visible");
       targetsEl.classList.remove("visible");
       gazeCursor.style.display = "none";
       cal = null;
@@ -624,6 +678,8 @@
         setStatus("Calibration failed — please try again.", true);
         mode = "preview";
         calBtn.classList.add("visible");
+        modeToggle.classList.add("visible");
+        handsBtn.classList.add("visible");
         return;
       }
       console.log(
@@ -654,8 +710,36 @@
       gazeCursor.style.display = "block";
       recalBtn.classList.add("visible");
       modeToggle.classList.add("visible");
+      handsBtn.classList.add("visible");
       const quality = cal && cal.rms < 0.06 ? "good" : "rough — consider recalibrating";
       setStatus(`Calibrated (fit: ${quality}). Look at a tile, tap ANYWHERE to select.`);
+    }
+
+    function hitTile(px, py) {
+      for (const el of tileEls) {
+        const r = el.getBoundingClientRect();
+        if (px >= r.left && px <= r.right && py >= r.top && py <= r.bottom) return el;
+      }
+      return null;
+    }
+
+    function activateTile(el, verb) {
+      el.classList.remove("activated");
+      void el.offsetWidth; // restart the CSS animation
+      el.classList.add("activated");
+      setStatus(`✔ ${verb}: ${el.dataset.label}`);
+      console.log(`[Eyeball] ${verb}: ${el.dataset.label}`);
+      if (navigator.vibrate) navigator.vibrate(30);
+    }
+
+    // Map a normalized video coordinate to screen pixels, accounting for the
+    // object-fit: cover crop and the CSS mirror — needed to hit-test DOM
+    // tiles against a fingertip tracked in video space.
+    function videoToScreen(nx, ny) {
+      const vw = window.innerWidth, vh = window.innerHeight;
+      const scale = Math.max(vw / canvas.width, vh / canvas.height);
+      const dw = canvas.width * scale, dh = canvas.height * scale;
+      return [(vw - dw) / 2 + (1 - nx) * dw, (vh - dh) / 2 + ny * dh];
     }
 
     function updateGaze(feature) {
@@ -684,14 +768,7 @@
       gazeCursor.style.transform = `translate3d(${px}px, ${py}px, 0)`;
 
       // Highlight the tile under the gaze point.
-      let hit = null;
-      for (const el of tileEls) {
-        const r = el.getBoundingClientRect();
-        if (px >= r.left && px <= r.right && py >= r.top && py <= r.bottom) {
-          hit = el;
-          break;
-        }
-      }
+      const hit = hitTile(px, py);
       if (hit !== lookedTile) {
         lookedTile?.classList.remove("looked");
         hit?.classList.add("looked");
@@ -705,12 +782,7 @@
       if (mode !== "gaze") return;
       if (e.target === recalBtn) return;
       if (lookedTile) {
-        lookedTile.classList.remove("activated");
-        void lookedTile.offsetWidth; // restart the CSS animation
-        lookedTile.classList.add("activated");
-        setStatus(`✔ Selected: ${lookedTile.dataset.label}`);
-        console.log(`[Eyeball] Look-and-tap selection: ${lookedTile.dataset.label}`);
-        if (navigator.vibrate) navigator.vibrate(30);
+        activateTile(lookedTile, "Selected");
       } else {
         setStatus("No tile under gaze — look at a tile, then tap.");
       }
@@ -808,6 +880,60 @@
             );
           }
         }
+
+        // ---------------- HAND TRACKING (point + pinch) ----------------
+        if (handsOn && handLandmarker) {
+          let hres = null;
+          try {
+            hres = handLandmarker.detectForVideo(video, performance.now());
+          } catch (err) {
+            console.error("[Eyeball] hand detectForVideo failed:", err);
+          }
+          const hands = hres?.landmarks ?? [];
+
+          for (const hand of hands) {
+            drawingUtils.drawConnectors(hand, HandLandmarker.HAND_CONNECTIONS,
+              { color: "rgba(0, 229, 255, 0.6)", lineWidth: 2 });
+            drawingUtils.drawLandmarks(hand, { color: "#00E5FF", radius: 2.5 });
+          }
+
+          let pointedNow = null;
+          const hand = hands[0]; // first hand drives the pointer
+          if (hand) {
+            const tip = hand[8];
+            // Pinch = thumb-tip to index-tip distance, normalized by hand
+            // size (wrist to middle-finger base) so it works at any distance
+            // from the camera. Hysteresis prevents flicker at the threshold.
+            const pinchDist = Math.hypot(hand[4].x - tip.x, hand[4].y - tip.y);
+            const handSize = Math.hypot(hand[0].x - hand[9].x, hand[0].y - hand[9].y) || 1;
+            const ratio = pinchDist / handSize;
+            const wasPinched = pinched;
+            if (!pinched && ratio < 0.28) pinched = true;
+            else if (pinched && ratio > 0.42) pinched = false;
+
+            // Fingertip ring on the canvas (auto-aligned with the video).
+            const tx = tip.x * canvas.width, ty = tip.y * canvas.height;
+            ctx.beginPath();
+            ctx.arc(tx, ty, pinched ? 10 : 16, 0, Math.PI * 2);
+            ctx.strokeStyle = "#00E5FF";
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            if (pinched) { ctx.fillStyle = "rgba(0, 229, 255, 0.45)"; ctx.fill(); }
+
+            // Tile interaction happens in screen space.
+            const [sx, sy] = videoToScreen(tip.x, tip.y);
+            pointedNow = hitTile(sx, sy);
+            if (pinched && !wasPinched && pointedNow) activateTile(pointedNow, "Pinched");
+          } else {
+            pinched = false;
+          }
+
+          if (pointedNow !== pointedTile) {
+            pointedTile?.classList.remove("pointed");
+            pointedNow?.classList.add("pointed");
+            pointedTile = pointedNow;
+          }
+        }
       }
 
       // Prefer requestVideoFrameCallback (fires exactly once per camera
@@ -829,6 +955,7 @@
         mode = "preview";
         calBtn.classList.add("visible");
         modeToggle.classList.add("visible");
+        handsBtn.classList.add("visible");
         setStatus("Tracking… green dots = iris centers. Pick a mode, then Calibrate.");
         renderLoop();
       } catch (err) {
@@ -872,6 +999,39 @@
         calBtn.classList.add("visible");
       }
       setStatus(`Mode: ${wantHead ? "eyes + head" : "eyes only"} — tap Calibrate.`);
+    });
+
+    // Hand tracking toggle: lazy-loads the hand model on first use, and shows
+    // the tiles even without gaze calibration so point-and-pinch works alone.
+    handsBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+    handsBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!handLandmarker) {
+        if (handLoading) return;
+        handLoading = true;
+        setStatus("Loading hand model…");
+        try {
+          handLandmarker = await createHandLandmarker();
+        } catch (err) {
+          console.error("[Eyeball] Hand model init error:", err);
+          setStatus("Failed to load hand model. Check network access.", true);
+          handLoading = false;
+          return;
+        }
+        handLoading = false;
+      }
+      handsOn = !handsOn;
+      handsBtn.classList.toggle("on", handsOn);
+      if (handsOn) {
+        targetsEl.classList.add("visible");
+        setStatus("Hands on — point with your index finger, pinch to select a tile.");
+      } else {
+        pinched = false;
+        pointedTile?.classList.remove("pointed");
+        pointedTile = null;
+        if (mode !== "gaze") targetsEl.classList.remove("visible");
+        setStatus("Hands off.");
+      }
     });
   </script>
 </body>
