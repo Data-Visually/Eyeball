@@ -78,22 +78,29 @@ the periodic right-iris coordinate logs.
 
 ## How the gaze estimation works
 
-1. **Feature extraction** (per eye, per frame): the iris center's offset from
-   the midpoint of the eye corners (right eye: 33/133, left eye: 362/263),
-   normalized by eye width. Normalizing by width — not eyelid gap — keeps the
-   feature stable through blinks; frames where the eyelid gap drops below 12 %
-   of eye width are treated as blinks and skipped. Both eyes are averaged.
+1. **Feature extraction** (per frame, 8 dimensions):
+   - *Iris geometry*: each iris center's offset from the midpoint of the eye
+     corners (right eye: 33/133, left eye: 362/263), normalized by eye width.
+     Frames where the eyelid gap drops below 12 % of eye width are treated as
+     blinks and skipped. Both eyes are averaged.
+   - *Blendshape gaze scores*: MediaPipe's learned `eyeLookIn/Out/Up/Down`
+     blendshapes, combined into horizontal/vertical signals — notably stronger
+     vertically than raw iris geometry.
+   - *Head pose & position*: cheek depth difference (yaw), forehead-vs-chin
+     depth difference (pitch), and nose-tip position. These are essential:
+     people naturally turn their head partway toward what they look at, so a
+     mapping trained on eyeball rotation alone systematically undershoots at
+     runtime ("the cursor won't reach the edges").
 2. **Calibration**: 9 on-screen points. For each, the user looks at the dot
-   and taps; ~1 s of features are averaged into one sample.
-3. **Mapping**: per-axis least-squares fit of a quadratic polynomial basis
-   `[1, fx, fy, fx·fy, fx², fy²]` (normal equations + Gaussian elimination,
-   tiny ridge term for stability). 9 samples over 6 unknowns.
-4. **Runtime**: predicted gaze is clamped to the viewport and smoothed with an
-   exponential moving average (α = 0.3) before driving the cursor and tile
-   hit-testing.
+   and taps; after a 250 ms settle (tap jiggle), ~1 s of frames are recorded —
+   every frame is a training sample (~200+ total).
+3. **Mapping**: features are standardized, expanded with a small quadratic
+   basis on the iris terms, and ridge-regressed per axis (normal equations +
+   Gauss-Jordan). The training fit error is logged to the console.
+4. **Runtime**: predicted gaze is clamped to the viewport and smoothed with a
+   speed-adaptive filter — heavy while fixating (steady cursor), light during
+   saccades (fast catch-up).
 
-Known limitations (it's a prototype): accuracy degrades if you move your head
-significantly after calibrating — recalibrate via the ↻ button. Vertical gaze
-resolution is inherently weaker than horizontal on front cameras. A production
-version would fold in the head-pose transformation matrix and a Kalman/One-Euro
-filter.
+Known limitations (it's a prototype): large posture changes after calibrating
+still degrade accuracy — recalibrate via the ↻ button. Vertical resolution is
+inherently weaker than horizontal on front cameras.

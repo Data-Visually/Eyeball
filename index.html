@@ -232,6 +232,10 @@
     const LEFT_IRIS_RING  = [474, 475, 476, 477];
     const RIGHT_EYE = { iris: 468, c1: 33,  c2: 133, top: 159, bottom: 145 };
     const LEFT_EYE  = { iris: 473, c1: 362, c2: 263, top: 386, bottom: 374 };
+    // Head-pose proxy points: the z (depth) difference between the cheeks
+    // tracks yaw, forehead-vs-chin tracks pitch, and the nose tip tracks
+    // head position in the frame.
+    const NOSE_TIP = 1, CHEEK_R = 234, CHEEK_L = 454, FOREHEAD = 10, CHIN = 152;
 
     const TILES = [
       ["🎵", "Music"], ["📷", "Camera"],
@@ -245,9 +249,9 @@
       [0.88, 0.50], [0.50, 0.50], [0.12, 0.50],
       [0.12, 0.88], [0.50, 0.88], [0.88, 0.88]
     ];
-    const SAMPLE_MS = 900;        // how long we sample gaze per calibration dot
-    const MIN_SAMPLES = 5;        // fewer than this → face was lost, redo the dot
-    const SMOOTH_ALPHA = 0.3;     // EMA factor for the gaze cursor
+    const SAMPLE_MS = 1000;       // how long we sample gaze per calibration dot
+    const SETTLE_MS = 250;        // discard frames right after the tap (phone jiggle)
+    const MIN_SAMPLES = 8;        // fewer than this → face was lost, redo the dot
     const BLINK_OPENNESS = 0.12;  // eyelid gap / eye width below this = blink
 
     const video    = document.getElementById("video");
@@ -267,10 +271,10 @@
 
     // App state: "idle" → "preview" (iris dots only) → "calibrating" → "gaze"
     let mode = "idle";
-    let latestFeature = null;   // most recent gaze feature [fx, fy]
+    let latestFeature = null;   // most recent gaze feature vector
     let sampleBuf = null;       // non-null while calibration is sampling frames
-    let mapX = null, mapY = null; // fitted polynomial coefficients per axis
-    let smoothed = null;        // EMA'd gaze point, normalized [0..1]
+    let cal = null;             // fitted mapping {mean, std, coefX, coefY, rms}
+    let smoothed = null;        // smoothed gaze point, normalized [0..1]
     let lookedTile = null;      // tile currently under gaze
     let tileEls = [];
 
@@ -303,7 +307,9 @@
           },
           runningMode: "VIDEO",
           numFaces: 1,
-          outputFaceBlendshapes: false,
+          // Blendshapes include eyeLookIn/Out/Up/Down — the model's own
+          // learned gaze signals, stronger vertically than raw iris geometry.
+          outputFaceBlendshapes: true,
           outputFacialTransformationMatrixes: false
         };
 
@@ -342,8 +348,11 @@
           audio: false,
           video: {
             facingMode: "user",            // front-facing camera
-            width:  { ideal: 1280 },
-            height: { ideal: 720 }
+            // Higher capture resolution = more pixels on the eyes = less
+            // iris-landmark jitter. MediaPipe crops the face region, so
+            // this improves accuracy more than it costs.
+            width:  { ideal: 1920 },
+            height: { ideal: 1080 }
           }
         });
       } catch (err) {
@@ -393,21 +402,49 @@
       return [(iris.x - cx) / w, (iris.y - cy) / w];
     }
 
-    function computeGazeFeature(lm) {
+    // Blendshape gaze scores. Sign conventions don't matter — the regression
+    // learns them — only that the combined score moves monotonically with gaze.
+    let blendIdx = null;
+    function blendGaze(categories) {
+      if (!categories) return null;
+      if (!blendIdx) {
+        blendIdx = {};
+        categories.forEach((c, i) => { blendIdx[c.categoryName] = i; });
+      }
+      const v = (name) => categories[blendIdx[name]]?.score ?? 0;
+      return {
+        bx: (v("eyeLookOutLeft") + v("eyeLookInRight")) -
+            (v("eyeLookInLeft") + v("eyeLookOutRight")),
+        by: (v("eyeLookUpLeft") + v("eyeLookUpRight")) -
+            (v("eyeLookDownLeft") + v("eyeLookDownRight"))
+      };
+    }
+
+    // Full gaze feature vector. Head terms are essential: people naturally
+    // turn their head partway toward what they look at, so a mapping trained
+    // on eyeball rotation alone systematically under-shoots at runtime (the
+    // cursor "won't reach the edges"). Including head yaw/pitch/position lets
+    // the regression credit head movement with its share of the gaze shift.
+    function computeGazeFeature(lm, blendshapes) {
       const r = eyeFeature(lm, RIGHT_EYE);
       const l = eyeFeature(lm, LEFT_EYE);
-      if (r && l) return [(r[0] + l[0]) / 2, (r[1] + l[1]) / 2];
-      return r || l; // one eye blinking/occluded → use the other
+      const e = r && l ? [(r[0] + l[0]) / 2, (r[1] + l[1]) / 2] : (r || l);
+      if (!e) return null; // both eyes blinking/occluded
+      const b = blendGaze(blendshapes) ?? { bx: 0, by: 0 };
+      const hx = lm[CHEEK_R].z - lm[CHEEK_L].z;   // yaw proxy
+      const hy = lm[FOREHEAD].z - lm[CHIN].z;     // pitch proxy
+      const nose = lm[NOSE_TIP];                  // head position in frame
+      return [e[0], e[1], b.bx, b.by, hx, hy, nose.x, nose.y];
     }
 
     // --------------------- CALIBRATION & REGRESSION ---------------------
-    // Maps a gaze feature to normalized screen coordinates with a quadratic
-    // polynomial fit per axis: [1, fx, fy, fx*fy, fx², fy²] · coeffs.
-    // 9 calibration points over 6 unknowns → solved by least squares.
-    const basis = ([fx, fy]) => [1, fx, fy, fx * fy, fx * fx, fy * fy];
+    // Every sampled frame (not per-dot averages) becomes a training row:
+    // ~200+ samples over 9 dots. Features are standardized, expanded with a
+    // small quadratic basis on the iris terms, and ridge-fit per axis.
+    const basis = (f) => [1, ...f, f[0] * f[0], f[1] * f[1]];
     const dot = (a, b) => a.reduce((s, v, i) => s + v * b[i], 0);
 
-    function solveLinear(A, b) { // Gaussian elimination with partial pivoting
+    function solveLinear(A, b) { // Gauss-Jordan with partial pivoting
       const n = b.length;
       const M = A.map((row, i) => [...row, b[i]]);
       for (let col = 0; col < n; col++) {
@@ -425,19 +462,45 @@
       return M.map((row, i) => row[n] / row[i]);
     }
 
-    function fitAxis(samples, axis) {
-      const n = 6;
-      const AtA = Array.from({ length: n }, () => new Array(n).fill(0));
-      const Atb = new Array(n).fill(0);
-      for (const s of samples) {
-        const b = basis(s.f);
-        for (let i = 0; i < n; i++) {
-          Atb[i] += b[i] * s.t[axis];
-          for (let j = 0; j < n; j++) AtA[i][j] += b[i] * b[j];
-        }
-      }
-      for (let i = 0; i < n; i++) AtA[i][i] += 1e-8; // tiny ridge for stability
-      return solveLinear(AtA, Atb);
+    function fitMapping(samples) {
+      const dim = samples[0].f.length;
+      const n = samples.length;
+
+      // Standardize each feature so the ridge penalty treats them equally
+      // (iris offsets are ~0.05, blendshape diffs ~1, z-depth diffs ~0.1).
+      const mean = new Array(dim).fill(0);
+      for (const s of samples)
+        for (let i = 0; i < dim; i++) mean[i] += s.f[i] / n;
+      const std = new Array(dim).fill(0);
+      for (const s of samples)
+        for (let i = 0; i < dim; i++) std[i] += (s.f[i] - mean[i]) ** 2 / n;
+      for (let i = 0; i < dim; i++) std[i] = Math.max(Math.sqrt(std[i]), 1e-6);
+      const norm = (f) => f.map((v, i) => (v - mean[i]) / std[i]);
+
+      const X = samples.map((s) => basis(norm(s.f)));
+      const k = X[0].length;
+      const lambda = 1e-3 * n; // mild ridge; keeps collinear features stable
+      const AtA = Array.from({ length: k }, () => new Array(k).fill(0));
+      for (const row of X)
+        for (let i = 0; i < k; i++)
+          for (let j = 0; j < k; j++) AtA[i][j] += row[i] * row[j];
+      for (let i = 1; i < k; i++) AtA[i][i] += lambda; // don't penalize the bias
+
+      const fitAxis = (axis) => {
+        const Atb = new Array(k).fill(0);
+        samples.forEach((s, r) => {
+          for (let i = 0; i < k; i++) Atb[i] += X[r][i] * s.t[axis];
+        });
+        return solveLinear(AtA, Atb);
+      };
+      const coefX = fitAxis(0);
+      const coefY = fitAxis(1);
+
+      let se = 0;
+      samples.forEach((s, r) => {
+        se += (dot(X[r], coefX) - s.t[0]) ** 2 + (dot(X[r], coefY) - s.t[1]) ** 2;
+      });
+      return { mean, std, coefX, coefY, rms: Math.sqrt(se / n) };
     }
 
     function waitForTap() {
@@ -456,7 +519,7 @@
       recalBtn.classList.remove("visible");
       targetsEl.classList.remove("visible");
       gazeCursor.style.display = "none";
-      mapX = mapY = null;
+      cal = null;
       smoothed = null;
 
       const samples = [];
@@ -472,8 +535,10 @@
 
         await waitForTap();
 
-        // Keep looking at the dot: sample gaze features for ~1s post-tap.
+        // Keep looking at the dot: let the tap-jiggle settle, then sample
+        // gaze features for ~1s. Every frame becomes a training sample.
         calTarget.classList.add("sampling");
+        await delay(SETTLE_MS);
         sampleBuf = [];
         await delay(SAMPLE_MS);
         const buf = sampleBuf;
@@ -484,16 +549,13 @@
           await delay(1200);
           continue; // retry the same point
         }
-        const avg = buf.reduce((a, f) => [a[0] + f[0], a[1] + f[1]], [0, 0])
-                       .map((v) => v / buf.length);
-        samples.push({ f: avg, t: [nx, ny] });
+        for (const f of buf) samples.push({ f, t: [nx, ny] });
         i++;
       }
 
       calTarget.style.display = "none";
       try {
-        mapX = fitAxis(samples, 0);
-        mapY = fitAxis(samples, 1);
+        cal = fitMapping(samples);
       } catch (err) {
         console.error("[Eyeball] Calibration fit failed:", err);
         setStatus("Calibration failed — please try again.", true);
@@ -501,7 +563,11 @@
         calBtn.classList.add("visible");
         return;
       }
-      console.log("[Eyeball] Calibration complete. Coefficients:", { mapX, mapY });
+      console.log(
+        `[Eyeball] Calibration complete: ${samples.length} samples, ` +
+        `training fit error ≈ ${(cal.rms * 100).toFixed(1)}% of screen`,
+        cal
+      );
 
       enterGazeMode();
     }
@@ -524,19 +590,29 @@
       targetsEl.classList.add("visible");
       gazeCursor.style.display = "block";
       recalBtn.classList.add("visible");
-      setStatus("Look at a tile — it lights up. Tap ANYWHERE to select it.");
+      const quality = cal && cal.rms < 0.06 ? "good" : "rough — consider recalibrating";
+      setStatus(`Calibrated (fit: ${quality}). Look at a tile, tap ANYWHERE to select.`);
     }
 
     function updateGaze(feature) {
-      if (!feature || !mapX) return;
-      const b = basis(feature);
-      const gx = Math.min(1, Math.max(0, dot(b, mapX)));
-      const gy = Math.min(1, Math.max(0, dot(b, mapY)));
+      if (!feature || !cal) return;
+      const b = basis(feature.map((v, i) => (v - cal.mean[i]) / cal.std[i]));
+      let gx = dot(b, cal.coefX);
+      let gy = dot(b, cal.coefY);
+      if (!Number.isFinite(gx) || !Number.isFinite(gy)) return;
+      gx = Math.min(1, Math.max(0, gx));
+      gy = Math.min(1, Math.max(0, gy));
 
-      smoothed = smoothed
-        ? [smoothed[0] + (gx - smoothed[0]) * SMOOTH_ALPHA,
-           smoothed[1] + (gy - smoothed[1]) * SMOOTH_ALPHA]
-        : [gx, gy];
+      if (!smoothed) {
+        smoothed = [gx, gy];
+      } else {
+        // Speed-adaptive smoothing: heavy filtering while fixating (steady
+        // cursor), light filtering during saccades (fast catch-up, no lag).
+        const a = Math.min(0.8,
+          0.12 + Math.hypot(gx - smoothed[0], gy - smoothed[1]) * 5);
+        smoothed = [smoothed[0] + (gx - smoothed[0]) * a,
+                    smoothed[1] + (gy - smoothed[1]) * a];
+      }
 
       const px = smoothed[0] * window.innerWidth;
       const py = smoothed[1] * window.innerHeight;
@@ -637,7 +713,10 @@
           drawIrisDot(rightIris, RIGHT_IRIS_RING, landmarks);
           drawIrisDot(leftIris,  LEFT_IRIS_RING,  landmarks);
 
-          const feature = computeGazeFeature(landmarks);
+          const feature = computeGazeFeature(
+            landmarks,
+            result.faceBlendshapes?.[0]?.categories
+          );
           if (feature) {
             latestFeature = feature;
             if (sampleBuf) sampleBuf.push(feature);
