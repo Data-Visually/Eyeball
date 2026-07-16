@@ -17,6 +17,9 @@
       overflow: hidden;
       background: #000;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+      touch-action: manipulation;
     }
 
     /*
@@ -39,19 +42,107 @@
       object-fit: cover;
       transform: scaleX(-1);
     }
+    #overlay { z-index: 2; pointer-events: none; }
 
-    #overlay {
-      z-index: 2;
-      pointer-events: none;
-    }
-
-    #status {
+    /* ---------- Look & Tap targets ---------- */
+    #targets {
       position: fixed;
       z-index: 3;
+      inset: 0;
+      display: none;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr 1fr 1fr;
+      gap: 3vmin;
+      padding: 6vmin;
+      padding-top: max(6vmin, env(safe-area-inset-top));
+      padding-bottom: max(14vmin, env(safe-area-inset-bottom));
+      box-sizing: border-box;
+      pointer-events: none;   /* taps are handled globally: look chooses, any tap confirms */
+    }
+    #targets.visible { display: grid; }
+    .tile {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1vmin;
+      border-radius: 18px;
+      border: 3px solid rgba(255, 255, 255, 0.25);
+      background: rgba(0, 0, 0, 0.35);
+      color: #fff;
+      font-size: 3.5vmin;
+      transition: border-color 0.12s, background 0.12s, transform 0.12s;
+    }
+    .tile .emoji { font-size: 8vmin; }
+    .tile.looked {
+      border-color: #00ff44;
+      background: rgba(0, 255, 68, 0.18);
+      box-shadow: 0 0 24px rgba(0, 255, 68, 0.45);
+      transform: scale(1.04);
+    }
+    .tile.activated { animation: pop 0.35s ease; }
+    @keyframes pop {
+      0%   { transform: scale(1.04); background: rgba(0, 255, 68, 0.18); }
+      40%  { transform: scale(1.15); background: rgba(0, 255, 68, 0.65); }
+      100% { transform: scale(1.04); background: rgba(0, 255, 68, 0.18); }
+    }
+
+    /* ---------- Gaze cursor ---------- */
+    #gazeCursor {
+      position: fixed;
+      z-index: 5;
+      left: 0;
+      top: 0;
+      width: 36px;
+      height: 36px;
+      margin: -18px 0 0 -18px;    /* center on the gaze point */
+      border: 3px solid #00ff44;
+      border-radius: 50%;
+      box-shadow: 0 0 14px rgba(0, 255, 68, 0.8), inset 0 0 8px rgba(0, 255, 68, 0.5);
+      pointer-events: none;
+      display: none;
+      will-change: transform;
+    }
+
+    /* ---------- Calibration target ---------- */
+    #calTarget {
+      position: fixed;
+      z-index: 6;
+      left: 0;
+      top: 0;
+      width: 56px;
+      height: 56px;
+      margin: -28px 0 0 -28px;
+      border-radius: 50%;
+      border: 4px solid #ffcc00;
+      background: radial-gradient(circle, #ffcc00 0 8px, transparent 9px);
+      box-shadow: 0 0 20px rgba(255, 204, 0, 0.8);
+      pointer-events: none;
+      display: none;
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50%      { transform: scale(1.25); }
+    }
+    #calTarget.sampling {
+      animation: shrink 0.9s linear forwards;
+      border-color: #00ff44;
+      box-shadow: 0 0 20px rgba(0, 255, 68, 0.8);
+    }
+    @keyframes shrink {
+      from { transform: scale(1.25); }
+      to   { transform: scale(0.45); }
+    }
+
+    /* ---------- Status pill & buttons ---------- */
+    #status {
+      position: fixed;
+      z-index: 7;
       left: 50%;
-      bottom: max(24px, env(safe-area-inset-bottom));
+      top: max(18px, env(safe-area-inset-top));
       transform: translateX(-50%);
-      max-width: 90vw;
+      max-width: 92vw;
       padding: 10px 18px;
       border-radius: 999px;
       background: rgba(0, 0, 0, 0.65);
@@ -59,15 +150,34 @@
       font-size: 14px;
       text-align: center;
       transition: opacity 0.4s;
+      pointer-events: none;
     }
     #status.error { background: rgba(180, 30, 30, 0.85); }
     #status.hidden { opacity: 0; }
+
+    .ctl {
+      position: fixed;
+      z-index: 6;
+      bottom: max(20px, env(safe-area-inset-bottom));
+      padding: 12px 22px;
+      border: 0;
+      border-radius: 999px;
+      background: #00c838;
+      color: #002a0c;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      display: none;
+    }
+    .ctl.visible { display: block; }
+    #calibrateBtn   { left: 50%; transform: translateX(-50%); }
+    #recalibrateBtn { right: 16px; background: rgba(255, 255, 255, 0.85); color: #000; font-size: 13px; padding: 9px 14px; }
 
     /* Mobile Safari/Chrome require a user gesture before camera prompts feel
        reliable, and autoplay policies are friendlier after a tap. */
     #start {
       position: fixed;
-      z-index: 4;
+      z-index: 10;
       inset: 0;
       display: flex;
       align-items: center;
@@ -90,7 +200,14 @@
   -->
   <video id="video" autoplay muted playsinline webkit-playsinline></video>
   <canvas id="overlay"></canvas>
+
+  <div id="targets" aria-hidden="true"></div>
+  <div id="gazeCursor"></div>
+  <div id="calTarget"></div>
+
   <div id="status">Loading…</div>
+  <button id="calibrateBtn" class="ctl">🎯 Calibrate gaze</button>
+  <button id="recalibrateBtn" class="ctl">↻ Recalibrate</button>
   <button id="start">👁️ Tap to start eye tracking</button>
 
   <script type="module">
@@ -105,21 +222,57 @@
     // added by iris refinement:
     //   468..472 = RIGHT iris (anatomical right eye): 468 = center, 469-472 = ring
     //   473..477 = LEFT  iris (anatomical left eye):  473 = center, 474-477 = ring
+    // Eye contour points used for gaze normalization:
+    //   right eye: corners 33 (outer) / 133 (inner), lids 159 (top) / 145 (bottom)
+    //   left eye:  corners 362 (inner) / 263 (outer), lids 386 (top) / 374 (bottom)
     // ---------------------------------------------------------------------
     const RIGHT_IRIS_CENTER = 468;
     const LEFT_IRIS_CENTER  = 473;
     const RIGHT_IRIS_RING = [469, 470, 471, 472];
     const LEFT_IRIS_RING  = [474, 475, 476, 477];
+    const RIGHT_EYE = { iris: 468, c1: 33,  c2: 133, top: 159, bottom: 145 };
+    const LEFT_EYE  = { iris: 473, c1: 362, c2: 263, top: 386, bottom: 374 };
 
-    const video   = document.getElementById("video");
-    const canvas  = document.getElementById("overlay");
-    const ctx     = canvas.getContext("2d");
+    const TILES = [
+      ["🎵", "Music"], ["📷", "Camera"],
+      ["💬", "Chat"],  ["🗺️", "Maps"],
+      ["✉️", "Mail"],  ["⚙️", "Settings"]
+    ];
+
+    // 9-point calibration grid, in normalized viewport coordinates.
+    const CAL_POINTS = [
+      [0.12, 0.12], [0.50, 0.12], [0.88, 0.12],
+      [0.88, 0.50], [0.50, 0.50], [0.12, 0.50],
+      [0.12, 0.88], [0.50, 0.88], [0.88, 0.88]
+    ];
+    const SAMPLE_MS = 900;        // how long we sample gaze per calibration dot
+    const MIN_SAMPLES = 5;        // fewer than this → face was lost, redo the dot
+    const SMOOTH_ALPHA = 0.3;     // EMA factor for the gaze cursor
+    const BLINK_OPENNESS = 0.12;  // eyelid gap / eye width below this = blink
+
+    const video    = document.getElementById("video");
+    const canvas   = document.getElementById("overlay");
+    const ctx      = canvas.getContext("2d");
     const statusEl = document.getElementById("status");
     const startBtn = document.getElementById("start");
+    const calBtn   = document.getElementById("calibrateBtn");
+    const recalBtn = document.getElementById("recalibrateBtn");
+    const calTarget  = document.getElementById("calTarget");
+    const gazeCursor = document.getElementById("gazeCursor");
+    const targetsEl  = document.getElementById("targets");
 
     let faceLandmarker = null;
     let frameCount = 0;
     let lastVideoTime = -1;
+
+    // App state: "idle" → "preview" (iris dots only) → "calibrating" → "gaze"
+    let mode = "idle";
+    let latestFeature = null;   // most recent gaze feature [fx, fy]
+    let sampleBuf = null;       // non-null while calibration is sampling frames
+    let mapX = null, mapY = null; // fitted polynomial coefficients per axis
+    let smoothed = null;        // EMA'd gaze point, normalized [0..1]
+    let lookedTile = null;      // tile currently under gaze
+    let tileEls = [];
 
     function setStatus(msg, isError = false) {
       statusEl.textContent = msg;
@@ -128,8 +281,9 @@
       if (isError) console.error("[Eyeball]", msg);
       else console.log("[Eyeball]", msg);
     }
+    const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
-    // ------------------------- 2. MEDIAPIPE SETUP -------------------------
+    // ------------------------- MEDIAPIPE SETUP -------------------------
     async function createFaceLandmarker() {
       setStatus("Loading MediaPipe Face Landmarker model…");
       try {
@@ -170,7 +324,7 @@
       }
     }
 
-    // --------------------------- 1. CAMERA SETUP ---------------------------
+    // --------------------------- CAMERA SETUP ---------------------------
     async function startCamera() {
       if (!window.isSecureContext) {
         setStatus("Camera requires HTTPS (or localhost). Serve this page over a secure origin.", true);
@@ -220,7 +374,208 @@
       console.log(`[Eyeball] Camera ready: ${video.videoWidth}x${video.videoHeight}`);
     }
 
-    // ----------------- 3. DETECTION LOOP + VISUALIZATION -----------------
+    // ----------------------- GAZE FEATURE EXTRACTION -----------------------
+    // For each eye: the iris center's offset from the midpoint of the eye
+    // corners, normalized by eye width. Normalizing by width (not eyelid gap)
+    // keeps the feature stable through blinks and half-closed eyes; the
+    // corner midpoint is rigid, so the feature mostly isolates eyeball
+    // rotation from head translation. Both eyes are averaged.
+    function eyeFeature(lm, eye) {
+      const c1 = lm[eye.c1], c2 = lm[eye.c2];
+      const w = Math.hypot(c1.x - c2.x, c1.y - c2.y);
+      if (w < 1e-6) return null;
+      const openness = Math.hypot(lm[eye.top].x - lm[eye.bottom].x,
+                                  lm[eye.top].y - lm[eye.bottom].y) / w;
+      if (openness < BLINK_OPENNESS) return null; // blinking — iris is unreliable
+      const cx = (c1.x + c2.x) / 2;
+      const cy = (c1.y + c2.y) / 2;
+      const iris = lm[eye.iris];
+      return [(iris.x - cx) / w, (iris.y - cy) / w];
+    }
+
+    function computeGazeFeature(lm) {
+      const r = eyeFeature(lm, RIGHT_EYE);
+      const l = eyeFeature(lm, LEFT_EYE);
+      if (r && l) return [(r[0] + l[0]) / 2, (r[1] + l[1]) / 2];
+      return r || l; // one eye blinking/occluded → use the other
+    }
+
+    // --------------------- CALIBRATION & REGRESSION ---------------------
+    // Maps a gaze feature to normalized screen coordinates with a quadratic
+    // polynomial fit per axis: [1, fx, fy, fx*fy, fx², fy²] · coeffs.
+    // 9 calibration points over 6 unknowns → solved by least squares.
+    const basis = ([fx, fy]) => [1, fx, fy, fx * fy, fx * fx, fy * fy];
+    const dot = (a, b) => a.reduce((s, v, i) => s + v * b[i], 0);
+
+    function solveLinear(A, b) { // Gaussian elimination with partial pivoting
+      const n = b.length;
+      const M = A.map((row, i) => [...row, b[i]]);
+      for (let col = 0; col < n; col++) {
+        let piv = col;
+        for (let r = col + 1; r < n; r++)
+          if (Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r;
+        [M[col], M[piv]] = [M[piv], M[col]];
+        if (Math.abs(M[col][col]) < 1e-12) throw new Error("Singular calibration matrix");
+        for (let r = 0; r < n; r++) {
+          if (r === col) continue;
+          const f = M[r][col] / M[col][col];
+          for (let c = col; c <= n; c++) M[r][c] -= f * M[col][c];
+        }
+      }
+      return M.map((row, i) => row[n] / row[i]);
+    }
+
+    function fitAxis(samples, axis) {
+      const n = 6;
+      const AtA = Array.from({ length: n }, () => new Array(n).fill(0));
+      const Atb = new Array(n).fill(0);
+      for (const s of samples) {
+        const b = basis(s.f);
+        for (let i = 0; i < n; i++) {
+          Atb[i] += b[i] * s.t[axis];
+          for (let j = 0; j < n; j++) AtA[i][j] += b[i] * b[j];
+        }
+      }
+      for (let i = 0; i < n; i++) AtA[i][i] += 1e-8; // tiny ridge for stability
+      return solveLinear(AtA, Atb);
+    }
+
+    function waitForTap() {
+      return new Promise((resolve) => {
+        // Small delay so the tap that advanced the previous step (or opened
+        // calibration) can't double-fire into this one.
+        setTimeout(() => {
+          document.addEventListener("pointerdown", resolve, { once: true });
+        }, 350);
+      });
+    }
+
+    async function runCalibration() {
+      mode = "calibrating";
+      calBtn.classList.remove("visible");
+      recalBtn.classList.remove("visible");
+      targetsEl.classList.remove("visible");
+      gazeCursor.style.display = "none";
+      mapX = mapY = null;
+      smoothed = null;
+
+      const samples = [];
+      let i = 0;
+      while (i < CAL_POINTS.length) {
+        const [nx, ny] = CAL_POINTS[i];
+        calTarget.style.display = "block";
+        calTarget.classList.remove("sampling");
+        calTarget.style.transform = ""; // let the pulse animation own transform
+        calTarget.style.left = `${nx * 100}vw`;
+        calTarget.style.top  = `${ny * 100}vh`;
+        setStatus(`Look at the yellow dot, then tap anywhere (${i + 1}/${CAL_POINTS.length})`);
+
+        await waitForTap();
+
+        // Keep looking at the dot: sample gaze features for ~1s post-tap.
+        calTarget.classList.add("sampling");
+        sampleBuf = [];
+        await delay(SAMPLE_MS);
+        const buf = sampleBuf;
+        sampleBuf = null;
+
+        if (buf.length < MIN_SAMPLES) {
+          setStatus("Face lost during sampling — let's redo that dot.");
+          await delay(1200);
+          continue; // retry the same point
+        }
+        const avg = buf.reduce((a, f) => [a[0] + f[0], a[1] + f[1]], [0, 0])
+                       .map((v) => v / buf.length);
+        samples.push({ f: avg, t: [nx, ny] });
+        i++;
+      }
+
+      calTarget.style.display = "none";
+      try {
+        mapX = fitAxis(samples, 0);
+        mapY = fitAxis(samples, 1);
+      } catch (err) {
+        console.error("[Eyeball] Calibration fit failed:", err);
+        setStatus("Calibration failed — please try again.", true);
+        mode = "preview";
+        calBtn.classList.add("visible");
+        return;
+      }
+      console.log("[Eyeball] Calibration complete. Coefficients:", { mapX, mapY });
+
+      enterGazeMode();
+    }
+
+    // --------------------------- LOOK & TAP ---------------------------
+    function buildTiles() {
+      targetsEl.innerHTML = "";
+      tileEls = TILES.map(([emoji, label]) => {
+        const el = document.createElement("div");
+        el.className = "tile";
+        el.innerHTML = `<span class="emoji">${emoji}</span><span>${label}</span>`;
+        el.dataset.label = label;
+        targetsEl.appendChild(el);
+        return el;
+      });
+    }
+
+    function enterGazeMode() {
+      mode = "gaze";
+      targetsEl.classList.add("visible");
+      gazeCursor.style.display = "block";
+      recalBtn.classList.add("visible");
+      setStatus("Look at a tile — it lights up. Tap ANYWHERE to select it.");
+    }
+
+    function updateGaze(feature) {
+      if (!feature || !mapX) return;
+      const b = basis(feature);
+      const gx = Math.min(1, Math.max(0, dot(b, mapX)));
+      const gy = Math.min(1, Math.max(0, dot(b, mapY)));
+
+      smoothed = smoothed
+        ? [smoothed[0] + (gx - smoothed[0]) * SMOOTH_ALPHA,
+           smoothed[1] + (gy - smoothed[1]) * SMOOTH_ALPHA]
+        : [gx, gy];
+
+      const px = smoothed[0] * window.innerWidth;
+      const py = smoothed[1] * window.innerHeight;
+      gazeCursor.style.transform = `translate3d(${px}px, ${py}px, 0)`;
+
+      // Highlight the tile under the gaze point.
+      let hit = null;
+      for (const el of tileEls) {
+        const r = el.getBoundingClientRect();
+        if (px >= r.left && px <= r.right && py >= r.top && py <= r.bottom) {
+          hit = el;
+          break;
+        }
+      }
+      if (hit !== lookedTile) {
+        lookedTile?.classList.remove("looked");
+        hit?.classList.add("looked");
+        lookedTile = hit;
+      }
+    }
+
+    // Look chooses, tap confirms: any tap activates whichever tile the user
+    // is currently looking at.
+    document.addEventListener("pointerdown", (e) => {
+      if (mode !== "gaze") return;
+      if (e.target === recalBtn) return;
+      if (lookedTile) {
+        lookedTile.classList.remove("activated");
+        void lookedTile.offsetWidth; // restart the CSS animation
+        lookedTile.classList.add("activated");
+        setStatus(`✔ Selected: ${lookedTile.dataset.label}`);
+        console.log(`[Eyeball] Look-and-tap selection: ${lookedTile.dataset.label}`);
+        if (navigator.vibrate) navigator.vibrate(30);
+      } else {
+        setStatus("No tile under gaze — look at a tile, then tap.");
+      }
+    });
+
+    // ----------------- DETECTION LOOP + VISUALIZATION -----------------
     function drawIrisDot(landmark, ringIndices, landmarks) {
       const x = landmark.x * canvas.width;
       const y = landmark.y * canvas.height;
@@ -282,6 +637,13 @@
           drawIrisDot(rightIris, RIGHT_IRIS_RING, landmarks);
           drawIrisDot(leftIris,  LEFT_IRIS_RING,  landmarks);
 
+          const feature = computeGazeFeature(landmarks);
+          if (feature) {
+            latestFeature = feature;
+            if (sampleBuf) sampleBuf.push(feature);
+            if (mode === "gaze") updateGaze(feature);
+          }
+
           frameCount++;
           if (frameCount % 60 === 0) {
             console.log(
@@ -309,8 +671,10 @@
       try {
         await createFaceLandmarker();   // load model first (slow part)
         await startCamera();            // then prompt for camera
-        setStatus("Tracking… green dots = iris centers");
-        setTimeout(() => statusEl.classList.add("hidden"), 3000);
+        buildTiles();
+        mode = "preview";
+        calBtn.classList.add("visible");
+        setStatus("Tracking… green dots = iris centers. Tap Calibrate when ready.");
         renderLoop();
       } catch (err) {
         // setStatus already showed a specific message; re-show the button
@@ -319,6 +683,16 @@
         startBtn.textContent = "⟳ Retry";
       }
     }, { passive: true });
+
+    calBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      runCalibration();
+    });
+    recalBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+    recalBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      runCalibration();
+    });
   </script>
 </body>
 </html>
