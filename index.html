@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <!--
+    viewport-fit=cover + user-scalable=no keeps the full-screen video stable on
+    mobile (no accidental pinch-zoom while tapping, no notch letterboxing).
+  -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Eyeball — Look &amp; Tap Prototype</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    /*
+      Video and canvas are stacked full-screen with identical object-fit: cover
+      rules. Because the canvas's internal bitmap is set to the video's native
+      resolution (videoWidth x videoHeight), object-fit crops both layers
+      identically, so a dot drawn at a landmark's pixel position on the canvas
+      lands exactly on that feature in the video — on any screen aspect ratio.
+
+      scaleX(-1) mirrors both layers, giving the "selfie mirror" view users
+      expect from a front camera. Landmarks are drawn in un-mirrored video
+      coordinates, and the CSS transform flips video + dots together, so they
+      stay perfectly registered.
+    */
+    #video, #overlay {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+    }
+
+    #overlay {
+      z-index: 2;
+      pointer-events: none;
+    }
+
+    #status {
+      position: fixed;
+      z-index: 3;
+      left: 50%;
+      bottom: max(24px, env(safe-area-inset-bottom));
+      transform: translateX(-50%);
+      max-width: 90vw;
+      padding: 10px 18px;
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.65);
+      color: #fff;
+      font-size: 14px;
+      text-align: center;
+      transition: opacity 0.4s;
+    }
+    #status.error { background: rgba(180, 30, 30, 0.85); }
+    #status.hidden { opacity: 0; }
+
+    /* Mobile Safari/Chrome require a user gesture before camera prompts feel
+       reliable, and autoplay policies are friendlier after a tap. */
+    #start {
+      position: fixed;
+      z-index: 4;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #000;
+      color: #fff;
+      border: 0;
+      font-size: 20px;
+      cursor: pointer;
+    }
+    #start.hidden { display: none; }
+  </style>
+</head>
+<body>
+  <!--
+    playsinline (and its legacy webkit- twin) is mandatory on iOS Safari:
+    without it the video hijacks the screen into the native fullscreen player
+    and the canvas overlay never shows. muted + autoplay keeps mobile autoplay
+    policies happy since we never need audio.
+  -->
+  <video id="video" autoplay muted playsinline webkit-playsinline></video>
+  <canvas id="overlay"></canvas>
+  <div id="status">Loading…</div>
+  <button id="start">👁️ Tap to start eye tracking</button>
+
+  <script type="module">
+    import {
+      FaceLandmarker,
+      FilesetResolver
+    } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+    // ---------------------------------------------------------------------
+    // Landmark indices (MediaPipe Face Landmarker, 478-point refined mesh).
+    // Points 0-467 are the face mesh; 468-477 are the 10 iris landmarks
+    // added by iris refinement:
+    //   468..472 = RIGHT iris (anatomical right eye): 468 = center, 469-472 = ring
+    //   473..477 = LEFT  iris (anatomical left eye):  473 = center, 474-477 = ring
+    // ---------------------------------------------------------------------
+    const RIGHT_IRIS_CENTER = 468;
+    const LEFT_IRIS_CENTER  = 473;
+    const RIGHT_IRIS_RING = [469, 470, 471, 472];
+    const LEFT_IRIS_RING  = [474, 475, 476, 477];
+
+    const video   = document.getElementById("video");
+    const canvas  = document.getElementById("overlay");
+    const ctx     = canvas.getContext("2d");
+    const statusEl = document.getElementById("status");
+    const startBtn = document.getElementById("start");
+
+    let faceLandmarker = null;
+    let frameCount = 0;
+    let lastVideoTime = -1;
+
+    function setStatus(msg, isError = false) {
+      statusEl.textContent = msg;
+      statusEl.classList.toggle("error", isError);
+      statusEl.classList.remove("hidden");
+      if (isError) console.error("[Eyeball]", msg);
+      else console.log("[Eyeball]", msg);
+    }
+
+    // ------------------------- 2. MEDIAPIPE SETUP -------------------------
+    async function createFaceLandmarker() {
+      setStatus("Loading MediaPipe Face Landmarker model…");
+      try {
+        const filesetResolver = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+        );
+
+        // NOTE: In the JS tasks-vision API the running modes are "IMAGE" and
+        // "VIDEO". "VIDEO" + detectForVideo() per frame IS the live-stream
+        // mode on the web (LIVE_STREAM is the Android/iOS SDK name for the
+        // same thing).
+        const options = {
+          baseOptions: {
+            modelAssetPath:
+              "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+            delegate: "GPU"
+          },
+          runningMode: "VIDEO",
+          numFaces: 1,
+          outputFaceBlendshapes: false,
+          outputFacialTransformationMatrixes: false
+        };
+
+        try {
+          faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, options);
+        } catch (gpuErr) {
+          // Some mobile GPUs / WebGL contexts fail — retry on CPU before giving up.
+          console.warn("[Eyeball] GPU delegate failed, retrying with CPU:", gpuErr);
+          options.baseOptions.delegate = "CPU";
+          faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, options);
+        }
+
+        setStatus("Model loaded ✔");
+      } catch (err) {
+        setStatus("Failed to load Face Landmarker model. Check network/CDN access.", true);
+        console.error("[Eyeball] Model init error:", err);
+        throw err;
+      }
+    }
+
+    // --------------------------- 1. CAMERA SETUP ---------------------------
+    async function startCamera() {
+      if (!window.isSecureContext) {
+        setStatus("Camera requires HTTPS (or localhost). Serve this page over a secure origin.", true);
+        throw new Error("Insecure context: getUserMedia is unavailable.");
+      }
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setStatus("getUserMedia is not supported in this browser.", true);
+        throw new Error("getUserMedia unsupported.");
+      }
+
+      setStatus("Requesting camera permission…");
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            facingMode: "user",            // front-facing camera
+            width:  { ideal: 1280 },
+            height: { ideal: 720 }
+          }
+        });
+      } catch (err) {
+        const hint = err.name === "NotAllowedError"
+          ? "Permission denied — allow camera access in browser settings and reload."
+          : err.name === "NotFoundError"
+            ? "No front-facing camera found."
+            : `Camera error: ${err.name}`;
+        setStatus(hint, true);
+        console.error("[Eyeball] getUserMedia error:", err);
+        throw err;
+      }
+
+      video.srcObject = stream;
+
+      // Wait until the video has real dimensions before sizing the canvas.
+      await new Promise((resolve) => {
+        if (video.readyState >= HTMLMediaElement.HAVE_METADATA) resolve();
+        else video.addEventListener("loadedmetadata", resolve, { once: true });
+      });
+      // iOS Safari sometimes needs an explicit play() even with autoplay.
+      try { await video.play(); } catch (e) { console.warn("[Eyeball] video.play():", e); }
+
+      // Canvas bitmap = native camera resolution → landmark math is 1:1 with
+      // the video frame; CSS object-fit handles the on-screen scaling/crop.
+      canvas.width  = video.videoWidth;
+      canvas.height = video.videoHeight;
+      console.log(`[Eyeball] Camera ready: ${video.videoWidth}x${video.videoHeight}`);
+    }
+
+    // ----------------- 3. DETECTION LOOP + VISUALIZATION -----------------
+    function drawIrisDot(landmark, ringIndices, landmarks) {
+      const x = landmark.x * canvas.width;
+      const y = landmark.y * canvas.height;
+
+      // Estimate iris radius from the ring landmarks so the marker scales
+      // with distance from the camera.
+      let radius = 4;
+      if (ringIndices.length) {
+        let sum = 0;
+        for (const i of ringIndices) {
+          const dx = (landmarks[i].x - landmark.x) * canvas.width;
+          const dy = (landmarks[i].y - landmark.y) * canvas.height;
+          sum += Math.hypot(dx, dy);
+        }
+        radius = Math.max(3, sum / ringIndices.length);
+      }
+
+      // High-contrast marker: bright green fill, dark outline, crosshair dot.
+      ctx.beginPath();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      ctx.strokeStyle = "#00FF44";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(x, y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = "#00FF44";
+      ctx.strokeStyle = "rgba(0,0,0,0.8)";
+      ctx.lineWidth = 1.5;
+      ctx.fill();
+      ctx.stroke();
+    }
+
+    function renderLoop() {
+      // Only run inference when a NEW frame is available; on mobile the
+      // camera is often 30fps while rAF runs at 60fps — detecting the same
+      // frame twice wastes battery and can confuse the VIDEO-mode timestamp
+      // requirement (timestamps must be monotonically increasing).
+      if (video.currentTime !== lastVideoTime && video.videoWidth > 0) {
+        lastVideoTime = video.currentTime;
+
+        let result;
+        try {
+          result = faceLandmarker.detectForVideo(video, performance.now());
+        } catch (err) {
+          console.error("[Eyeball] detectForVideo failed:", err);
+          result = null;
+        }
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        if (result?.faceLandmarks?.length) {
+          // 478 normalized 3D landmarks (x, y in [0,1]; z = relative depth).
+          const landmarks = result.faceLandmarks[0];
+
+          const rightIris = landmarks[RIGHT_IRIS_CENTER];
+          const leftIris  = landmarks[LEFT_IRIS_CENTER];
+
+          drawIrisDot(rightIris, RIGHT_IRIS_RING, landmarks);
+          drawIrisDot(leftIris,  LEFT_IRIS_RING,  landmarks);
+
+          frameCount++;
+          if (frameCount % 60 === 0) {
+            console.log(
+              `[Eyeball] Right iris center — ` +
+              `normalized: (${rightIris.x.toFixed(4)}, ${rightIris.y.toFixed(4)}) | ` +
+              `pixels: (${(rightIris.x * canvas.width).toFixed(1)}, ${(rightIris.y * canvas.height).toFixed(1)}) | ` +
+              `z: ${rightIris.z.toFixed(4)}`
+            );
+          }
+        }
+      }
+
+      // Prefer requestVideoFrameCallback (fires exactly once per camera
+      // frame) where supported; fall back to requestAnimationFrame.
+      if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+        video.requestVideoFrameCallback(renderLoop);
+      } else {
+        requestAnimationFrame(renderLoop);
+      }
+    }
+
+    // ------------------------------ BOOT ------------------------------
+    startBtn.addEventListener("click", async () => {
+      startBtn.classList.add("hidden");
+      try {
+        await createFaceLandmarker();   // load model first (slow part)
+        await startCamera();            // then prompt for camera
+        setStatus("Tracking… green dots = iris centers");
+        setTimeout(() => statusEl.classList.add("hidden"), 3000);
+        renderLoop();
+      } catch (err) {
+        // setStatus already showed a specific message; re-show the button
+        // so the user can retry after fixing permissions/network.
+        startBtn.classList.remove("hidden");
+        startBtn.textContent = "⟳ Retry";
+      }
+    }, { passive: true });
+  </script>
+</body>
+</html>
