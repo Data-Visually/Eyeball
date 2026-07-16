@@ -252,7 +252,10 @@
     const SAMPLE_MS = 1000;       // how long we sample gaze per calibration dot
     const SETTLE_MS = 250;        // discard frames right after the tap (phone jiggle)
     const MIN_SAMPLES = 8;        // fewer than this → face was lost, redo the dot
-    const BLINK_OPENNESS = 0.12;  // eyelid gap / eye width below this = blink
+    const BLINK_OPENNESS = 0.10;  // eyelid gap / eye width below this = blink
+                                  // (kept low: drooping lids while looking down
+                                  // are a gaze SIGNAL, not noise — see openness
+                                  // feature — so only reject true blinks)
 
     const video    = document.getElementById("video");
     const canvas   = document.getElementById("overlay");
@@ -384,64 +387,79 @@
     }
 
     // ----------------------- GAZE FEATURE EXTRACTION -----------------------
-    // For each eye: the iris center's offset from the midpoint of the eye
-    // corners, normalized by eye width. Normalizing by width (not eyelid gap)
-    // keeps the feature stable through blinks and half-closed eyes; the
-    // corner midpoint is rigid, so the feature mostly isolates eyeball
-    // rotation from head translation. Both eyes are averaged.
+    // Four features per eye, all normalized by eye width so they're stable
+    // against head distance:
+    //   [0] iris x-offset from the eye-corner midpoint (horizontal gaze)
+    //   [1] iris y-offset from the eye-corner midpoint (vertical gaze)
+    //   [2] iris-to-eyelid balance: closer to the upper or lower lid —
+    //       a second, independent vertical-gaze signal
+    //   [3] eye openness: lids droop when looking down, widen looking up
     function eyeFeature(lm, eye) {
       const c1 = lm[eye.c1], c2 = lm[eye.c2];
       const w = Math.hypot(c1.x - c2.x, c1.y - c2.y);
       if (w < 1e-6) return null;
-      const openness = Math.hypot(lm[eye.top].x - lm[eye.bottom].x,
-                                  lm[eye.top].y - lm[eye.bottom].y) / w;
-      if (openness < BLINK_OPENNESS) return null; // blinking — iris is unreliable
+      const top = lm[eye.top], bottom = lm[eye.bottom];
+      const openness = Math.hypot(top.x - bottom.x, top.y - bottom.y) / w;
+      if (openness < BLINK_OPENNESS) return null; // true blink — iris unreliable
       const cx = (c1.x + c2.x) / 2;
       const cy = (c1.y + c2.y) / 2;
       const iris = lm[eye.iris];
-      return [(iris.x - cx) / w, (iris.y - cy) / w];
+      const balance =
+        (Math.hypot(iris.x - top.x, iris.y - top.y) -
+         Math.hypot(iris.x - bottom.x, iris.y - bottom.y)) / w;
+      return [(iris.x - cx) / w, (iris.y - cy) / w, balance, openness];
     }
 
-    // Blendshape gaze scores. Sign conventions don't matter — the regression
-    // learns them — only that the combined score moves monotonically with gaze.
+    // MediaPipe's 8 learned gaze blendshapes, fed to the regression
+    // individually (it learns each one's sign and weight itself).
+    const GAZE_BLENDSHAPES = [
+      "eyeLookInLeft", "eyeLookOutLeft", "eyeLookUpLeft", "eyeLookDownLeft",
+      "eyeLookInRight", "eyeLookOutRight", "eyeLookUpRight", "eyeLookDownRight"
+    ];
     let blendIdx = null;
     function blendGaze(categories) {
-      if (!categories) return null;
+      if (!categories) return new Array(GAZE_BLENDSHAPES.length).fill(0);
       if (!blendIdx) {
         blendIdx = {};
         categories.forEach((c, i) => { blendIdx[c.categoryName] = i; });
       }
-      const v = (name) => categories[blendIdx[name]]?.score ?? 0;
-      return {
-        bx: (v("eyeLookOutLeft") + v("eyeLookInRight")) -
-            (v("eyeLookInLeft") + v("eyeLookOutRight")),
-        by: (v("eyeLookUpLeft") + v("eyeLookUpRight")) -
-            (v("eyeLookDownLeft") + v("eyeLookDownRight"))
-      };
+      return GAZE_BLENDSHAPES.map((n) => categories[blendIdx[n]]?.score ?? 0);
     }
 
-    // Full gaze feature vector. Head terms are essential: people naturally
-    // turn their head partway toward what they look at, so a mapping trained
-    // on eyeball rotation alone systematically under-shoots at runtime (the
-    // cursor "won't reach the edges"). Including head yaw/pitch/position lets
-    // the regression credit head movement with its share of the gaze shift.
+    // Full gaze feature vector — 22 dimensions:
+    //   [0..3]   right-eye iris geometry   [4..7]  left-eye iris geometry
+    //   [8..15]  the 8 eyeLook* blendshape scores
+    //   [16..21] head pose & position: yaw, pitch, roll, nose x/y,
+    //            inter-ocular distance (distance to screen)
+    // Head terms are essential: people naturally turn their head partway
+    // toward what they look at, so a mapping trained on eyeball rotation
+    // alone systematically under-shoots at runtime (the cursor "won't reach
+    // the edges"). The regression learns each user's personal head/eye mix.
     function computeGazeFeature(lm, blendshapes) {
       const r = eyeFeature(lm, RIGHT_EYE);
       const l = eyeFeature(lm, LEFT_EYE);
-      const e = r && l ? [(r[0] + l[0]) / 2, (r[1] + l[1]) / 2] : (r || l);
-      if (!e) return null; // both eyes blinking/occluded
-      const b = blendGaze(blendshapes) ?? { bx: 0, by: 0 };
-      const hx = lm[CHEEK_R].z - lm[CHEEK_L].z;   // yaw proxy
-      const hy = lm[FOREHEAD].z - lm[CHIN].z;     // pitch proxy
+      if (!r && !l) return null;   // both eyes blinking/occluded
+      const rr = r ?? l, ll = l ?? r; // wink tolerance: mirror the open eye
+
+      const b = blendGaze(blendshapes);
+
+      const hx = lm[CHEEK_R].z - lm[CHEEK_L].z;   // yaw proxy (depth diff)
+      const hy = lm[FOREHEAD].z - lm[CHIN].z;     // pitch proxy (depth diff)
+      const outerR = lm[33], outerL = lm[263];    // outer eye corners
+      const roll = Math.atan2(outerL.y - outerR.y, outerL.x - outerR.x);
+      const iod  = Math.hypot(outerL.x - outerR.x, outerL.y - outerR.y);
       const nose = lm[NOSE_TIP];                  // head position in frame
-      return [e[0], e[1], b.bx, b.by, hx, hy, nose.x, nose.y];
+
+      return [...rr, ...ll, ...b, hx, hy, roll, nose.x, nose.y, iod];
     }
 
     // --------------------- CALIBRATION & REGRESSION ---------------------
     // Every sampled frame (not per-dot averages) becomes a training row:
-    // ~200+ samples over 9 dots. Features are standardized, expanded with a
-    // small quadratic basis on the iris terms, and ridge-fit per axis.
-    const basis = (f) => [1, ...f, f[0] * f[0], f[1] * f[1]];
+    // ~200+ samples over 9 dots. Features are standardized, expanded with
+    // quadratic terms on the four iris offsets (indices 0,1 right / 4,5 left
+    // — the terms with real curvature), and ridge-fit per axis.
+    const basis = (f) =>
+      [1, ...f, f[0] * f[0], f[1] * f[1], f[4] * f[4], f[5] * f[5]];
     const dot = (a, b) => a.reduce((s, v, i) => s + v * b[i], 0);
 
     function solveLinear(A, b) { // Gauss-Jordan with partial pivoting

@@ -78,25 +78,30 @@ the periodic right-iris coordinate logs.
 
 ## How the gaze estimation works
 
-1. **Feature extraction** (per frame, 8 dimensions):
-   - *Iris geometry*: each iris center's offset from the midpoint of the eye
-     corners (right eye: 33/133, left eye: 362/263), normalized by eye width.
-     Frames where the eyelid gap drops below 12 % of eye width are treated as
-     blinks and skipped. Both eyes are averaged.
-   - *Blendshape gaze scores*: MediaPipe's learned `eyeLookIn/Out/Up/Down`
-     blendshapes, combined into horizontal/vertical signals — notably stronger
-     vertically than raw iris geometry.
-   - *Head pose & position*: cheek depth difference (yaw), forehead-vs-chin
-     depth difference (pitch), and nose-tip position. These are essential:
-     people naturally turn their head partway toward what they look at, so a
-     mapping trained on eyeball rotation alone systematically undershoots at
-     runtime ("the cursor won't reach the edges").
+1. **Feature extraction** (per frame, 22 dimensions):
+   - *Iris geometry, per eye* (4 features × 2 eyes): iris offset from the
+     eye-corner midpoint (x and y), iris-to-eyelid balance (a second,
+     independent vertical-gaze signal), and eye openness (lids droop looking
+     down, widen looking up) — all normalized by eye width. Frames where the
+     eyelid gap drops below 10 % of eye width are treated as true blinks and
+     skipped; a single winking eye is mirrored from the open one.
+   - *Blendshape gaze scores* (8 features): MediaPipe's learned
+     `eyeLookIn/Out/Up/Down` blendshapes for each eye, fed individually so
+     the regression weighs each one itself.
+   - *Head pose & position* (6 features): cheek depth difference (yaw),
+     forehead-vs-chin depth difference (pitch), roll angle of the eye line,
+     nose-tip position, and inter-ocular distance (distance to screen).
+     Head terms are essential: people naturally turn their head partway
+     toward what they look at, so a mapping trained on eyeball rotation
+     alone systematically undershoots at runtime ("the cursor won't reach
+     the edges").
 2. **Calibration**: 9 on-screen points. For each, the user looks at the dot
    and taps; after a 250 ms settle (tap jiggle), ~1 s of frames are recorded —
    every frame is a training sample (~200+ total).
-3. **Mapping**: features are standardized, expanded with a small quadratic
-   basis on the iris terms, and ridge-regressed per axis (normal equations +
-   Gauss-Jordan). The training fit error is logged to the console.
+3. **Mapping**: features are standardized, expanded with quadratic terms on
+   the four iris offsets (27 basis terms total), and ridge-regressed per axis
+   (normal equations + Gauss-Jordan). The training fit error is logged to the
+   console.
 4. **Runtime**: predicted gaze is clamped to the viewport and smoothed with a
    speed-adaptive filter — heavy while fixating (steady cursor), light during
    saccades (fast catch-up).
