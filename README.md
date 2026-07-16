@@ -41,16 +41,11 @@ Open <http://localhost:8000>.
 
 Your phone can't use your laptop's `localhost`, so you need HTTPS. Easiest options:
 
-- **GitHub Pages** (automated): this repo ships a workflow
-  (`.github/workflows/pages.yml`) that deploys the site to Pages on every
-  push. Once the action has run, open
-  `https://data-visually.github.io/Eyeball/` on your phone.
-  ⚠️ **This repo is currently private**, and GitHub Pages on private repos
-  requires a paid GitHub plan — so the deploy step fails until you either
-  (a) make the repo public (Settings → General → Danger Zone → Change
-  visibility), or (b) upgrade the plan. After that, re-run the
-  "Deploy to GitHub Pages" action once (Actions tab → Re-run) and it will
-  self-enable Pages and deploy on every push from then on.
+- **GitHub Pages** (automated, already live): the site is served from the
+  `gh-pages` branch at **<https://data-visually.github.io/Eyeball/>**.
+  A workflow (`.github/workflows/pages.yml`) force-syncs every push on the
+  development branch to `gh-pages`, so the live site always matches the
+  latest commit.
 - **A tunnel**: `npx ngrok http 8000` (or `cloudflared tunnel --url http://localhost:8000`)
   and open the generated `https://` URL on your phone.
 
