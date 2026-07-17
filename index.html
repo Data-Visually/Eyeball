@@ -82,6 +82,17 @@
       padding: 9px 14px;
     }
     #reachBtn.on { background: #ffd93d; color: #3a2f00; }
+    #flipBtn {
+      top: calc(max(18px, env(safe-area-inset-top)) + 230px);
+      bottom: auto;
+      right: 16px;
+      background: rgba(255, 255, 255, 0.85);
+      color: #000;
+      font-size: 13px;
+      padding: 9px 14px;
+      display: none;
+    }
+    #flipBtn.visible { display: block; }
     #avatarBtn {
       top: calc(max(18px, env(safe-area-inset-top)) + 138px);
       bottom: auto;
@@ -449,6 +460,7 @@
   <button id="settingsBtn" class="ctl">⚙️ Tune</button>
   <button id="avatarBtn" class="ctl">🕺 Avatar</button>
   <button id="reachBtn" class="ctl">🫳 Reach</button>
+  <button id="flipBtn" class="ctl">🔃 Flip hands</button>
   <div id="settings">
     <h4>🎛 WINDOW TUNING</h4>
     <label>Room depth <span id="v_roomDepthM"></span></label>
@@ -540,6 +552,7 @@
     const settingsBtn  = document.getElementById("settingsBtn");
     const avatarBtn    = document.getElementById("avatarBtn");
     const reachBtn     = document.getElementById("reachBtn");
+    const flipBtn      = document.getElementById("flipBtn");
     const settingsPanel = document.getElementById("settings");
     const readoutEl    = document.getElementById("readout");
     const tilesToggleBtn = document.getElementById("tilesToggle");
@@ -589,6 +602,11 @@
     let reachOn = false;
     let reachLoading = false;
     let reachRig = null;        // Three.js scene: floating grabbable objects
+    // Which horizontal convention makes the hands read as first-person is
+    // camera/perception dependent and can't be verified without a live hand,
+    // so it's a user toggle. true = selfie-mirror (1-x); false = direct. The z
+    // sign flips with it so the mapping stays a proper rotation either way.
+    let reachMirror = true;
 
     // 3D mode: tiles float INSIDE the corridor (all depths behind the screen
     // plane), camera coupled to the viewer's tracked eye — a window into a
@@ -1335,12 +1353,11 @@
     // a pure rotation. (A left-handed/reflection basis fed to
     // setFromRotationMatrix is what was shearing/squashing the held mesh.)
     function handQuaternion(hand) {
-      // First-person = 180° rotation about the vertical axis (camera view →
-      // your own viewpoint): flip x AND z together. That's a PROPER rotation,
-      // so the hand keeps its real chirality (a right hand looks like a right
-      // hand) while landing on the correct side. +z (not -z) is what makes it
-      // a rotation rather than a reflection (which mirror-imaged the hand).
-      const P = (i) => new THREE.Vector3(1 - hand[i].x, -hand[i].y, (hand[i].z || 0) * 2);
+      // Flip x and z together (a proper rotation, not a reflection) so the hand
+      // keeps its chirality. reachMirror picks which horizontal convention.
+      const sx = reachMirror ? -1 : 1, off = reachMirror ? 1 : 0;
+      const P = (i) => new THREE.Vector3(
+        off + sx * hand[i].x, -hand[i].y, sx * (hand[i].z || 0) * 2);
       const yA = P(9).sub(P(0));            // wrist → middle knuckle = "up"
       if (yA.lengthSq() < 1e-8) return new THREE.Quaternion();
       yA.normalize();
@@ -1391,11 +1408,12 @@
     function updateHand3D(R, rig, hand) {
       if (!hand) { rig.group.visible = false; return; }
       rig.group.visible = true;
+      const zs = reachMirror ? 1 : -1;
       const pts = hand.map((lm) => {
-        R.htmp.set((1 - lm.x) * 2 - 1, -(lm.y * 2 - 1)); // x flip → correct side
+        const nx = reachMirror ? (1 - lm.x) : lm.x;   // horizontal convention
+        R.htmp.set(nx * 2 - 1, -(lm.y * 2 - 1));
         const p = rayWorld(R, R.htmp, HAND_ZBASE);
-        p.z += (lm.z || 0) * 6; // +z flip: makes x+z a PROPER rotation (AR/VR
-                                // first-person), not a chirality-flipping mirror
+        p.z += zs * (lm.z || 0) * 6; // z sign tracks x so it stays a rotation
         return p;
       });
       for (let i = 0; i < 21; i++) rig.joints[i].position.copy(pts[i]);
@@ -1434,10 +1452,11 @@
         }
         const isPinch = grab.obj ? pinchRatio(hand) < 0.42 : pinchRatio(hand) < 0.26;
 
-        // Pinch midpoint → NDC. First-person mirror: on-screen x = 1 - image x,
-        // so your right hand is on your right and motion matches your body.
+        // Pinch midpoint → NDC, using the same horizontal convention as the
+        // rendered hand so the grab point stays under the visible fingers.
         const mx = (hand[4].x + hand[8].x) / 2, my = (hand[4].y + hand[8].y) / 2;
-        R.ndc.set((1 - mx) * 2 - 1, -(my * 2 - 1));
+        const nmx = reachMirror ? (1 - mx) : mx;
+        R.ndc.set(nmx * 2 - 1, -(my * 2 - 1));
         const handQ = handQuaternion(hand);
 
         if (isPinch && !grab.obj) {
@@ -1966,7 +1985,7 @@
       avatarBtn.classList.toggle("on", avatarOn);
       avatarCanvas.classList.toggle("visible", avatarOn);
       if (avatarOn) {
-        if (reachOn) { reachOn = false; reachBtn.classList.remove("on"); reachCanvas.classList.remove("visible"); document.body.classList.remove("reach-active"); }
+        if (reachOn) { reachOn = false; reachBtn.classList.remove("on"); reachCanvas.classList.remove("visible"); flipBtn.classList.remove("visible"); document.body.classList.remove("reach-active"); }
         resizeAvatar();
         setStatus("Avatar on — move your body; it mirrors you. Stand back so you're in frame.");
       } else {
@@ -1998,14 +2017,24 @@
       reachOn = !reachOn;
       reachBtn.classList.toggle("on", reachOn);
       reachCanvas.classList.toggle("visible", reachOn);
+      flipBtn.classList.toggle("visible", reachOn);
       document.body.classList.toggle("reach-active", reachOn);
       if (reachOn) {
         if (avatarOn) { avatarOn = false; avatarBtn.classList.remove("on"); avatarCanvas.classList.remove("visible"); }
         resizeReach();
-        setStatus("Reach on — first-person. Pinch to grab a floating object; twist your hand to turn it.");
+        setStatus("Reach on — pinch to grab. If your hands look mirrored, tap 🔃 Flip hands.");
       } else {
         setStatus("Reach off.");
       }
+    });
+
+    // Flip hands: swap the horizontal convention until the hands read as your
+    // own from your point of view (camera/perception dependent — you pick).
+    flipBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+    flipBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      reachMirror = !reachMirror;
+      setStatus(`Hands: ${reachMirror ? "mirrored" : "direct"} mapping.`);
     });
 
     window.addEventListener("resize", () => {
