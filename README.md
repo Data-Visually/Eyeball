@@ -66,7 +66,15 @@ No build step, no native app, no Xcode — just one `index.html`.
    are EMA-smoothed to tame jitter. Stand back so your body is in view. This
    is a puppet rig (procedural, no external model) — the natural base for
    swapping in a proper VRM avatar later.
-11. **Look and Tap**: after calibrating, a green gaze cursor follows your eyes
+11. **Reach mode** (🫳 toggle): first-person — a **transparent** 3D layer of
+   floating, glowing objects sits over the video, so **your real hands stay
+   visible** underneath and you reach *into* the scene. **Pinch** (thumb +
+   finger) near an object to grab it; it glows and follows your pinch, and
+   **releasing drops it** where you let go. Both hands work independently.
+   Grab uses screen-space proximity; the held object tracks the camera ray at
+   its depth. This is the base for "pick things up" interactions (and, next,
+   a wand). Shares one hand-detection pass with Hand mode.
+12. **Look and Tap**: after calibrating, a green gaze cursor follows your eyes
    across a grid of app tiles. The tile you're looking at lights up; tapping
    **anywhere** on the screen selects it (with haptic feedback where
    supported). Look chooses, tap confirms.

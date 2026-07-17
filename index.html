@@ -55,6 +55,28 @@
       pointer-events: none;
     }
     #avatarCanvas.visible { display: block; }
+    /* Reach stage: a TRANSPARENT WebGL canvas over the video — your real hands
+       stay visible underneath, virtual objects float on top to be grabbed. */
+    #reachCanvas {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 4;
+      display: none;
+      pointer-events: none;
+    }
+    #reachCanvas.visible { display: block; }
+    #reachBtn {
+      top: calc(max(18px, env(safe-area-inset-top)) + 184px);
+      bottom: auto;
+      right: 16px;
+      background: rgba(255, 255, 255, 0.85);
+      color: #000;
+      font-size: 13px;
+      padding: 9px 14px;
+    }
+    #reachBtn.on { background: #ffd93d; color: #3a2f00; }
     #avatarBtn {
       top: calc(max(18px, env(safe-area-inset-top)) + 138px);
       bottom: auto;
@@ -398,6 +420,7 @@
   <video id="video" autoplay muted playsinline webkit-playsinline></video>
   <canvas id="overlay"></canvas>
   <canvas id="avatarCanvas"></canvas>
+  <canvas id="reachCanvas"></canvas>
 
   <div id="targets" aria-hidden="true">
     <div id="room">
@@ -420,6 +443,7 @@
   <button id="threeDBtn" class="ctl">🧊 3D</button>
   <button id="settingsBtn" class="ctl">⚙️ Tune</button>
   <button id="avatarBtn" class="ctl">🕺 Avatar</button>
+  <button id="reachBtn" class="ctl">🫳 Reach</button>
   <div id="settings">
     <h4>🎛 WINDOW TUNING</h4>
     <label>Room depth <span id="v_roomDepthM"></span></label>
@@ -510,6 +534,7 @@
     const roomEl       = document.getElementById("room");
     const settingsBtn  = document.getElementById("settingsBtn");
     const avatarBtn    = document.getElementById("avatarBtn");
+    const reachBtn     = document.getElementById("reachBtn");
     const settingsPanel = document.getElementById("settings");
     const readoutEl    = document.getElementById("readout");
     const tilesToggleBtn = document.getElementById("tilesToggle");
@@ -553,6 +578,12 @@
     let avatarLoading = false;
     let avatarRig = null;       // Three.js scene objects, built once
     const poseSmooth = [];      // EMA-smoothed world landmark positions
+
+    // Reach (first-person: grab floating 3D objects with your real hands).
+    const reachCanvas = document.getElementById("reachCanvas");
+    let reachOn = false;
+    let reachLoading = false;
+    let reachRig = null;        // Three.js scene: floating grabbable objects
 
     // 3D mode: tiles float INSIDE the corridor (all depths behind the screen
     // plane), camera coupled to the viewer's tracked eye — a window into a
@@ -893,6 +924,7 @@
       handsBtn.classList.remove("visible");
       threeDBtn.classList.remove("visible");
       avatarBtn.classList.remove("visible");
+      reachBtn.classList.remove("visible");
       targetsEl.classList.remove("visible");
       gazeCursor.style.display = "none";
       cal = null;
@@ -943,6 +975,7 @@
         handsBtn.classList.add("visible");
         threeDBtn.classList.add("visible");
         avatarBtn.classList.add("visible");
+        reachBtn.classList.add("visible");
         return;
       }
       console.log(
@@ -1173,6 +1206,121 @@
       avatarRig.renderer.render(avatarRig.scene, avatarRig.camera);
     }
 
+    // ---------------------- REACH (grab 3D objects, first-person) ----------------------
+    async function buildReachScene() {
+      const renderer = new THREE.WebGLRenderer({ canvas: reachCanvas, antialias: true, alpha: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setClearColor(0x000000, 0); // transparent → real hands show through
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+      camera.position.set(0, 0, 5);
+      scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+      const key = new THREE.DirectionalLight(0xffffff, 1.0);
+      key.position.set(2, 3, 4);
+      scene.add(key);
+
+      const geoms = [
+        new THREE.IcosahedronGeometry(0.5, 0),
+        new THREE.BoxGeometry(0.7, 0.7, 0.7),
+        new THREE.TorusGeometry(0.4, 0.16, 14, 28),
+        new THREE.DodecahedronGeometry(0.52),
+        new THREE.ConeGeometry(0.45, 0.85, 22)
+      ];
+      const colors = [0x00e5ff, 0xff7ad9, 0xffd93d, 0x8aff80, 0xb98cff];
+      const objects = geoms.map((g, i) => {
+        const mat = new THREE.MeshStandardMaterial({
+          color: colors[i], emissive: colors[i], emissiveIntensity: 0.25,
+          roughness: 0.3, metalness: 0.35
+        });
+        const m = new THREE.Mesh(g, mat);
+        const hx = (i / (geoms.length - 1) - 0.5) * 4.6;
+        const hy = i % 2 ? 0.8 : -0.8;
+        m.position.set(hx, hy, 0);
+        m.userData = { home: new THREE.Vector3(hx, hy, 0), phase: i * 1.3,
+          spin: 0.006 + i * 0.002, grabbedBy: -1 };
+        scene.add(m);
+        return m;
+      });
+
+      reachRig = { renderer, scene, camera, objects,
+        raycaster: new THREE.Raycaster(), ndc: new THREE.Vector2(),
+        proj: new THREE.Vector3(), grab: [{ obj: null }, { obj: null }], t: 0 };
+      resizeReach();
+      window.__reachTest = (hands) => updateReach({ landmarks: hands });
+      window.__reachDump = () => reachRig.objects.map((o) =>
+        ({ x: +o.position.x.toFixed(2), y: +o.position.y.toFixed(2), grabbedBy: o.userData.grabbedBy }));
+    }
+
+    function resizeReach() {
+      if (!reachRig) return;
+      const w = reachCanvas.clientWidth || window.innerWidth;
+      const h = reachCanvas.clientHeight || window.innerHeight;
+      reachRig.renderer.setSize(w, h, false);
+      reachRig.camera.aspect = w / h;
+      reachRig.camera.updateProjectionMatrix();
+    }
+
+    function updateReach(handResult) {
+      const R = reachRig;
+      if (!R) return;
+      R.t += 1;
+      const hands = handResult?.landmarks ?? [];
+
+      // Up to two hands, each can grab one object via thumb-index pinch.
+      for (let h = 0; h < 2; h++) {
+        const hand = hands[h];
+        const grab = R.grab[h];
+        if (!hand) { // hand left frame → drop
+          if (grab.obj) { grab.obj.userData.grabbedBy = -1; grab.obj = null; }
+          continue;
+        }
+        const tip = hand[8], thumb = hand[4];
+        const ratio = Math.hypot(thumb.x - tip.x, thumb.y - tip.y) /
+          (Math.hypot(hand[0].x - hand[9].x, hand[0].y - hand[9].y) || 1);
+        const isPinch = grab.obj ? ratio < 0.42 : ratio < 0.28; // hysteresis
+
+        // Pinch point → NDC (mirrored display: on-screen x = 1 - image x).
+        const mx = (thumb.x + tip.x) / 2, my = (thumb.y + tip.y) / 2;
+        R.ndc.set((1 - mx) * 2 - 1, -(my * 2 - 1));
+
+        if (isPinch && !grab.obj) { // grab the nearest free object on screen
+          let best = null, bestD = 0.17;
+          for (const o of R.objects) {
+            if (o.userData.grabbedBy >= 0) continue;
+            R.proj.copy(o.position).project(R.camera);
+            const d = Math.hypot(R.proj.x - R.ndc.x, R.proj.y - R.ndc.y);
+            if (d < bestD) { bestD = d; best = o; }
+          }
+          if (best) { grab.obj = best; best.userData.grabbedBy = h; }
+        }
+        if (grab.obj && isPinch) { // move held object along the ray at its z
+          R.raycaster.setFromCamera(R.ndc, R.camera);
+          const ro = R.raycaster.ray.origin, rd = R.raycaster.ray.direction;
+          const t = (grab.obj.position.z - ro.z) / rd.z;
+          grab.obj.position.set(ro.x + rd.x * t, ro.y + rd.y * t, grab.obj.position.z);
+        }
+        if (!isPinch && grab.obj) { grab.obj.userData.grabbedBy = -1; grab.obj = null; }
+      }
+
+      // Animate: grabbed objects glow/enlarge; free ones bob back toward home.
+      for (const o of R.objects) {
+        o.rotation.x += o.userData.spin;
+        o.rotation.y += o.userData.spin * 1.3;
+        const held = o.userData.grabbedBy >= 0;
+        const targetE = held ? 0.75 : 0.25;
+        const targetS = held ? 1.15 : 1.0;
+        o.material.emissiveIntensity += (targetE - o.material.emissiveIntensity) * 0.15;
+        o.scale.setScalar(o.scale.x + (targetS - o.scale.x) * 0.15);
+        if (!held) {
+          const ty = o.userData.home.y + Math.sin(R.t * 0.03 + o.userData.phase) * 0.13;
+          o.position.x += (o.userData.home.x - o.position.x) * 0.02;
+          o.position.y += (ty - o.position.y) * 0.08;
+          o.position.z += (o.userData.home.z - o.position.z) * 0.02;
+        }
+      }
+      R.renderer.render(R.scene, R.camera);
+    }
+
     function enterGazeMode() {
       mode = "gaze";
       targetsEl.classList.add("visible");
@@ -1182,6 +1330,7 @@
       handsBtn.classList.add("visible");
       threeDBtn.classList.add("visible");
       avatarBtn.classList.add("visible");
+      reachBtn.classList.add("visible");
       const quality = cal && cal.rms < 0.06 ? "good" : "rough — consider recalibrating";
       setStatus(`Calibrated (fit: ${quality}). Look at a tile, tap ANYWHERE to select.`);
     }
@@ -1354,15 +1503,21 @@
           }
         }
 
-        // ---------------- HAND TRACKING (point + pinch) ----------------
-        if (handsOn && handLandmarker) {
-          let hres = null;
+        // ---- Shared hand detection: the 2D overlay (Hands) and 3D Reach both
+        // read ONE detectForVideo per frame — two calls at the same timestamp
+        // throw a monotonicity error. ----
+        let handResult = null;
+        if ((handsOn || reachOn) && handLandmarker) {
           try {
-            hres = handLandmarker.detectForVideo(video, performance.now());
+            handResult = handLandmarker.detectForVideo(video, performance.now());
           } catch (err) {
             console.error("[Eyeball] hand detectForVideo failed:", err);
           }
-          const hands = hres?.landmarks ?? [];
+        }
+
+        // ---------------- HAND TRACKING (point + pinch) ----------------
+        if (handsOn && handResult) {
+          const hands = handResult.landmarks ?? [];
 
           for (const hand of hands) {
             drawingUtils.drawConnectors(hand, HandLandmarker.HAND_CONNECTIONS,
@@ -1408,6 +1563,9 @@
           }
         }
 
+        // ------------ REACH (grab floating 3D objects with your hands) ------------
+        if (reachOn && reachRig) updateReach(handResult);
+
         // ---------------- AVATAR (body skeleton → 3D figure) ----------------
         if (avatarOn && poseLandmarker && avatarRig) {
           let pres = null;
@@ -1444,6 +1602,7 @@
         handsBtn.classList.add("visible");
         threeDBtn.classList.add("visible");
         avatarBtn.classList.add("visible");
+        reachBtn.classList.add("visible");
         setStatus("Tracking… green dots = iris centers. Pick a mode, then Calibrate.");
         renderLoop();
       } catch (err) {
@@ -1623,6 +1782,7 @@
       avatarBtn.classList.toggle("on", avatarOn);
       avatarCanvas.classList.toggle("visible", avatarOn);
       if (avatarOn) {
+        if (reachOn) { reachOn = false; reachBtn.classList.remove("on"); reachCanvas.classList.remove("visible"); }
         resizeAvatar();
         setStatus("Avatar on — move your body; it mirrors you. Stand back so you're in frame.");
       } else {
@@ -1630,7 +1790,43 @@
       }
     });
 
-    window.addEventListener("resize", () => { if (avatarOn) resizeAvatar(); });
+    // Reach toggle: lazy-load Three.js + the Hand model, then grab floating 3D
+    // objects with your real hands (which stay visible through the clear canvas).
+    reachBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+    reachBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!reachRig) {
+        if (reachLoading) return;
+        reachLoading = true;
+        setStatus("Loading 3D engine and hand model…");
+        try {
+          if (!THREE) THREE = await import(THREE_URL);
+          if (!handLandmarker) handLandmarker = await createHandLandmarker();
+          await buildReachScene();
+        } catch (err) {
+          console.error("[Eyeball] Reach init error:", err);
+          setStatus("Failed to load Reach (3D engine or hand model). Check network.", true);
+          reachLoading = false;
+          return;
+        }
+        reachLoading = false;
+      }
+      reachOn = !reachOn;
+      reachBtn.classList.toggle("on", reachOn);
+      reachCanvas.classList.toggle("visible", reachOn);
+      if (reachOn) {
+        if (avatarOn) { avatarOn = false; avatarBtn.classList.remove("on"); avatarCanvas.classList.remove("visible"); }
+        resizeReach();
+        setStatus("Reach on — pinch (thumb + finger) to grab a floating object and move it.");
+      } else {
+        setStatus("Reach off.");
+      }
+    });
+
+    window.addEventListener("resize", () => {
+      if (avatarOn) resizeAvatar();
+      if (reachOn) resizeReach();
+    });
   </script>
 </body>
 </html>
