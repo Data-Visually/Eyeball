@@ -69,11 +69,19 @@ No build step, no native app, no Xcode — just one `index.html`.
 11. **Reach mode** (🫳 toggle): first-person — a **transparent** 3D layer of
    floating, glowing objects sits over the video, so **your real hands stay
    visible** underneath and you reach *into* the scene. **Pinch** (thumb +
-   finger) near an object to grab it; it glows and follows your pinch, and
-   **releasing drops it** where you let go. Both hands work independently.
-   Grab uses screen-space proximity; the held object tracks the camera ray at
-   its depth. This is the base for "pick things up" interactions (and, next,
-   a wand). Shares one hand-detection pass with Hand mode.
+   finger) on an object to grab it; both hands work independently. The grab is
+   built to feel physical, not "stuck to a point":
+   - **Held where you pinched** — a grab offset (stored in hand-local space)
+     keeps the object at the spot you grabbed instead of snapping its centre
+     to your fingers.
+   - **Turns with your hand** — the object's orientation and its offset are
+     rotated by a hand quaternion (from wrist→knuckle and thumb→index axes),
+     so twisting your wrist orbits and rotates the held object.
+   - **Weight + throw** — a spring follow gives it heft, and releasing while
+     moving imparts the object's velocity, so it flies and then drifts, bounces
+     off invisible walls, and eases back home (light custom physics).
+   This is the base for "pick things up" interactions (and, next, a wand).
+   Shares one hand-detection pass with Hand mode.
 12. **Look and Tap**: after calibrating, a green gaze cursor follows your eyes
    across a grid of app tiles. The tile you're looking at lights up; tapping
    **anywhere** on the screen selects it (with haptic feedback where

@@ -1237,18 +1237,24 @@
         const hy = i % 2 ? 0.8 : -0.8;
         m.position.set(hx, hy, 0);
         m.userData = { home: new THREE.Vector3(hx, hy, 0), phase: i * 1.3,
-          spin: 0.006 + i * 0.002, grabbedBy: -1 };
+          spin: 0.006 + i * 0.002, grabbedBy: -1, vel: new THREE.Vector3() };
         scene.add(m);
         return m;
       });
 
       reachRig = { renderer, scene, camera, objects,
         raycaster: new THREE.Raycaster(), ndc: new THREE.Vector2(),
-        proj: new THREE.Vector3(), grab: [{ obj: null }, { obj: null }], t: 0 };
+        proj: new THREE.Vector3(), t: 0,
+        bounds: [2.7, 1.8, 1.2], // x/y/z half-extents the objects bounce inside
+        grab: [{ obj: null }, { obj: null }] };
       resizeReach();
       window.__reachTest = (hands) => updateReach({ landmarks: hands });
       window.__reachDump = () => reachRig.objects.map((o) =>
         ({ x: +o.position.x.toFixed(2), y: +o.position.y.toFixed(2), grabbedBy: o.userData.grabbedBy }));
+      window.__reachProject = (i) => {
+        const v = reachRig.objects[i].position.clone().project(reachRig.camera);
+        return { ndcX: v.x, ndcY: v.y }; // → image coords: mx=1-(ndcX+1)/2, my=(1-ndcY)/2
+      };
     }
 
     function resizeReach() {
@@ -1260,63 +1266,114 @@
       reachRig.camera.updateProjectionMatrix();
     }
 
+    // Pinch closedness: thumb-tip↔index-tip distance over hand size.
+    const pinchRatio = (hand) =>
+      Math.hypot(hand[4].x - hand[8].x, hand[4].y - hand[8].y) /
+      (Math.hypot(hand[0].x - hand[9].x, hand[0].y - hand[9].y) || 1);
+
+    // Hand orientation as a quaternion, so a held object turns WITH the hand.
+    // Basis: "up" = wrist→middle-knuckle, "across" = thumb→index, palm normal
+    // from their cross product (re-orthogonalised). Mirror x for the selfie.
+    function handQuaternion(hand) {
+      const P = (i) => new THREE.Vector3(1 - hand[i].x, -hand[i].y, -(hand[i].z || 0) * 2);
+      const up = P(9).sub(P(0)).normalize();
+      const across = P(8).sub(P(4)).normalize();
+      let normal = new THREE.Vector3().crossVectors(up, across);
+      if (normal.lengthSq() < 1e-6) normal.set(0, 0, 1); else normal.normalize();
+      const ortho = new THREE.Vector3().crossVectors(normal, up).normalize();
+      return new THREE.Quaternion().setFromRotationMatrix(
+        new THREE.Matrix4().makeBasis(ortho, up, normal));
+    }
+
+    // Screen pinch point → a world point on the plane z = depth.
+    function pinchWorld(R, depth) {
+      R.raycaster.setFromCamera(R.ndc, R.camera);
+      const ro = R.raycaster.ray.origin, rd = R.raycaster.ray.direction;
+      const t = (depth - ro.z) / rd.z;
+      return new THREE.Vector3(ro.x + rd.x * t, ro.y + rd.y * t, depth);
+    }
+
     function updateReach(handResult) {
       const R = reachRig;
       if (!R) return;
       R.t += 1;
       const hands = handResult?.landmarks ?? [];
 
-      // Up to two hands, each can grab one object via thumb-index pinch.
       for (let h = 0; h < 2; h++) {
         const hand = hands[h];
         const grab = R.grab[h];
-        if (!hand) { // hand left frame → drop
+        if (!hand) { // hand left frame → let go (keeps any throw velocity)
           if (grab.obj) { grab.obj.userData.grabbedBy = -1; grab.obj = null; }
           continue;
         }
-        const tip = hand[8], thumb = hand[4];
-        const ratio = Math.hypot(thumb.x - tip.x, thumb.y - tip.y) /
-          (Math.hypot(hand[0].x - hand[9].x, hand[0].y - hand[9].y) || 1);
-        const isPinch = grab.obj ? ratio < 0.42 : ratio < 0.28; // hysteresis
+        const isPinch = grab.obj ? pinchRatio(hand) < 0.42 : pinchRatio(hand) < 0.26;
 
-        // Pinch point → NDC (mirrored display: on-screen x = 1 - image x).
-        const mx = (thumb.x + tip.x) / 2, my = (thumb.y + tip.y) / 2;
+        // Pinch midpoint → NDC (mirrored: on-screen x = 1 - image x).
+        const mx = (hand[4].x + hand[8].x) / 2, my = (hand[4].y + hand[8].y) / 2;
         R.ndc.set((1 - mx) * 2 - 1, -(my * 2 - 1));
+        const handQ = handQuaternion(hand);
 
-        if (isPinch && !grab.obj) { // grab the nearest free object on screen
-          let best = null, bestD = 0.17;
+        if (isPinch && !grab.obj) {
+          // Grab the nearest free object to the pinch on screen.
+          let best = null, bestD = 0.16;
           for (const o of R.objects) {
             if (o.userData.grabbedBy >= 0) continue;
             R.proj.copy(o.position).project(R.camera);
             const d = Math.hypot(R.proj.x - R.ndc.x, R.proj.y - R.ndc.y);
             if (d < bestD) { bestD = d; best = o; }
           }
-          if (best) { grab.obj = best; best.userData.grabbedBy = h; }
+          if (best) {
+            grab.obj = best;
+            best.userData.grabbedBy = h;
+            best.userData.vel.set(0, 0, 0);
+            grab.depth = best.position.z;
+            const pw = pinchWorld(R, grab.depth);
+            // Preserve WHERE on the object you pinched, in hand-local space, so
+            // it doesn't teleport its centre to your fingers…
+            grab.offset = best.position.clone().sub(pw)
+              .applyQuaternion(handQ.clone().invert());
+            // …and preserve its orientation relative to the hand.
+            grab.qOffset = handQ.clone().invert().multiply(best.quaternion);
+            grab.prev = best.position.clone();
+          }
         }
-        if (grab.obj && isPinch) { // move held object along the ray at its z
-          R.raycaster.setFromCamera(R.ndc, R.camera);
-          const ro = R.raycaster.ray.origin, rd = R.raycaster.ray.direction;
-          const t = (grab.obj.position.z - ro.z) / rd.z;
-          grab.obj.position.set(ro.x + rd.x * t, ro.y + rd.y * t, grab.obj.position.z);
+
+        if (grab.obj && isPinch) {
+          const o = grab.obj;
+          const target = pinchWorld(R, grab.depth)
+            .add(grab.offset.clone().applyQuaternion(handQ)); // orbit with hand
+          grab.prev.copy(o.position);
+          o.position.lerp(target, 0.5);                       // spring → weight
+          o.userData.vel.copy(o.position).sub(grab.prev);     // for throw
+          o.quaternion.copy(handQ).multiply(grab.qOffset);    // turn with hand
+          o.material.emissiveIntensity += (0.85 - o.material.emissiveIntensity) * 0.2;
+          o.scale.setScalar(o.scale.x + (1.12 - o.scale.x) * 0.2);
         }
-        if (!isPinch && grab.obj) { grab.obj.userData.grabbedBy = -1; grab.obj = null; }
+
+        if (!isPinch && grab.obj) { // release → object keeps its velocity
+          grab.obj.userData.grabbedBy = -1;
+          grab.obj = null;
+        }
       }
 
-      // Animate: grabbed objects glow/enlarge; free ones bob back toward home.
+      // Free-object physics: momentum from a throw, air drag, a gentle pull
+      // home, and a bounce off the invisible walls.
+      const [bx, by, bz] = R.bounds;
       for (const o of R.objects) {
+        if (o.userData.grabbedBy >= 0) continue;
+        const v = o.userData.vel, p = o.position, home = o.userData.home;
+        v.x += (home.x - p.x) * 0.003;
+        v.y += (home.y - p.y) * 0.003;
+        v.z += (home.z - p.z) * 0.003;
+        v.multiplyScalar(0.94);
+        p.add(v);
+        if (p.x > bx) { p.x = bx; v.x *= -0.6; } else if (p.x < -bx) { p.x = -bx; v.x *= -0.6; }
+        if (p.y > by) { p.y = by; v.y *= -0.6; } else if (p.y < -by) { p.y = -by; v.y *= -0.6; }
+        if (p.z > bz) { p.z = bz; v.z *= -0.6; } else if (p.z < -bz) { p.z = -bz; v.z *= -0.6; }
         o.rotation.x += o.userData.spin;
         o.rotation.y += o.userData.spin * 1.3;
-        const held = o.userData.grabbedBy >= 0;
-        const targetE = held ? 0.75 : 0.25;
-        const targetS = held ? 1.15 : 1.0;
-        o.material.emissiveIntensity += (targetE - o.material.emissiveIntensity) * 0.15;
-        o.scale.setScalar(o.scale.x + (targetS - o.scale.x) * 0.15);
-        if (!held) {
-          const ty = o.userData.home.y + Math.sin(R.t * 0.03 + o.userData.phase) * 0.13;
-          o.position.x += (o.userData.home.x - o.position.x) * 0.02;
-          o.position.y += (ty - o.position.y) * 0.08;
-          o.position.z += (o.userData.home.z - o.position.z) * 0.02;
-        }
+        o.material.emissiveIntensity += (0.25 - o.material.emissiveIntensity) * 0.1;
+        o.scale.setScalar(o.scale.x + (1 - o.scale.x) * 0.1);
       }
       R.renderer.render(R.scene, R.camera);
     }
