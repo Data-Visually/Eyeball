@@ -1330,7 +1330,8 @@
     // a pure rotation. (A left-handed/reflection basis fed to
     // setFromRotationMatrix is what was shearing/squashing the held mesh.)
     function handQuaternion(hand) {
-      const P = (i) => new THREE.Vector3(hand[i].x, -hand[i].y, -(hand[i].z || 0) * 2);
+      // Mirrored x (1 - x) = first-person: your right hand reads on your right.
+      const P = (i) => new THREE.Vector3(1 - hand[i].x, -hand[i].y, -(hand[i].z || 0) * 2);
       const yA = P(9).sub(P(0));            // wrist → middle knuckle = "up"
       if (yA.lengthSq() < 1e-8) return new THREE.Quaternion();
       yA.normalize();
@@ -1382,7 +1383,7 @@
       if (!hand) { rig.group.visible = false; return; }
       rig.group.visible = true;
       const pts = hand.map((lm) => {
-        R.htmp.set(lm.x * 2 - 1, -(lm.y * 2 - 1));
+        R.htmp.set((1 - lm.x) * 2 - 1, -(lm.y * 2 - 1)); // first-person mirror
         const p = rayWorld(R, R.htmp, HAND_ZBASE);
         p.z += -(lm.z || 0) * 6; // finger depth relative to wrist
         return p;
@@ -1423,10 +1424,10 @@
         }
         const isPinch = grab.obj ? pinchRatio(hand) < 0.42 : pinchRatio(hand) < 0.26;
 
-        // Pinch midpoint → NDC. First-person / un-mirrored: on-screen x = image
-        // x directly (the video is un-mirrored while Reach is active).
+        // Pinch midpoint → NDC. First-person mirror: on-screen x = 1 - image x,
+        // so your right hand is on your right and motion matches your body.
         const mx = (hand[4].x + hand[8].x) / 2, my = (hand[4].y + hand[8].y) / 2;
-        R.ndc.set(mx * 2 - 1, -(my * 2 - 1));
+        R.ndc.set((1 - mx) * 2 - 1, -(my * 2 - 1));
         const handQ = handQuaternion(hand);
 
         if (isPinch && !grab.obj) {
