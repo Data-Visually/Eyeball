@@ -43,6 +43,11 @@
       transform: scaleX(-1);
     }
     #overlay { z-index: 2; pointer-events: none; }
+    /* Reach is first-person: un-mirror the camera (and the hand-skeleton
+       overlay) so your hands read as reaching THROUGH the screen, not a
+       selfie reflection. */
+    body.reach-active #video,
+    body.reach-active #overlay { transform: none; }
     /* Avatar stage: an opaque WebGL canvas that covers the video when the
        skeleton-driven 3D figure is on. */
     #avatarCanvas {
@@ -1253,7 +1258,15 @@
         ({ x: +o.position.x.toFixed(2), y: +o.position.y.toFixed(2), grabbedBy: o.userData.grabbedBy }));
       window.__reachProject = (i) => {
         const v = reachRig.objects[i].position.clone().project(reachRig.camera);
-        return { ndcX: v.x, ndcY: v.y }; // → image coords: mx=1-(ndcX+1)/2, my=(1-ndcY)/2
+        return { ndcX: v.x, ndcY: v.y }; // → image coords: mx=(ndcX+1)/2, my=(1-ndcY)/2
+      };
+      window.__reachInspect = () => {
+        const o = reachRig.objects.find((x) => x.userData.grabbedBy >= 0) || reachRig.objects[0];
+        o.updateMatrixWorld(true);
+        const s = new THREE.Vector3();
+        o.matrixWorld.decompose(new THREE.Vector3(), new THREE.Quaternion(), s);
+        return { qlen: +o.quaternion.length().toFixed(4),
+          scale: [+s.x.toFixed(3), +s.y.toFixed(3), +s.z.toFixed(3)] };
       };
     }
 
@@ -1272,17 +1285,23 @@
       (Math.hypot(hand[0].x - hand[9].x, hand[0].y - hand[9].y) || 1);
 
     // Hand orientation as a quaternion, so a held object turns WITH the hand.
-    // Basis: "up" = wrist→middle-knuckle, "across" = thumb→index, palm normal
-    // from their cross product (re-orthogonalised). Mirror x for the selfie.
+    // First-person (un-mirrored) right-handed screen basis: x = image-right,
+    // y = up, z = toward viewer. The basis is built xA = yA×zA then
+    // zA = xA×yA so it is ALWAYS orthonormal and right-handed (det +1) — i.e.
+    // a pure rotation. (A left-handed/reflection basis fed to
+    // setFromRotationMatrix is what was shearing/squashing the held mesh.)
     function handQuaternion(hand) {
-      const P = (i) => new THREE.Vector3(1 - hand[i].x, -hand[i].y, -(hand[i].z || 0) * 2);
-      const up = P(9).sub(P(0)).normalize();
-      const across = P(8).sub(P(4)).normalize();
-      let normal = new THREE.Vector3().crossVectors(up, across);
-      if (normal.lengthSq() < 1e-6) normal.set(0, 0, 1); else normal.normalize();
-      const ortho = new THREE.Vector3().crossVectors(normal, up).normalize();
+      const P = (i) => new THREE.Vector3(hand[i].x, -hand[i].y, -(hand[i].z || 0) * 2);
+      const yA = P(9).sub(P(0));            // wrist → middle knuckle = "up"
+      if (yA.lengthSq() < 1e-8) return new THREE.Quaternion();
+      yA.normalize();
+      const across = P(8).sub(P(4));        // thumb → index
+      let zA = new THREE.Vector3().crossVectors(across, yA);
+      if (zA.lengthSq() < 1e-8) zA.set(0, 0, 1); else zA.normalize();
+      const xA = new THREE.Vector3().crossVectors(yA, zA).normalize();
+      zA.crossVectors(xA, yA).normalize();  // re-orthogonalise → right-handed
       return new THREE.Quaternion().setFromRotationMatrix(
-        new THREE.Matrix4().makeBasis(ortho, up, normal));
+        new THREE.Matrix4().makeBasis(xA, yA, zA));
     }
 
     // Screen pinch point → a world point on the plane z = depth.
@@ -1308,9 +1327,10 @@
         }
         const isPinch = grab.obj ? pinchRatio(hand) < 0.42 : pinchRatio(hand) < 0.26;
 
-        // Pinch midpoint → NDC (mirrored: on-screen x = 1 - image x).
+        // Pinch midpoint → NDC. First-person / un-mirrored: on-screen x = image
+        // x directly (the video is un-mirrored while Reach is active).
         const mx = (hand[4].x + hand[8].x) / 2, my = (hand[4].y + hand[8].y) / 2;
-        R.ndc.set((1 - mx) * 2 - 1, -(my * 2 - 1));
+        R.ndc.set(mx * 2 - 1, -(my * 2 - 1));
         const handQ = handQuaternion(hand);
 
         if (isPinch && !grab.obj) {
@@ -1839,7 +1859,7 @@
       avatarBtn.classList.toggle("on", avatarOn);
       avatarCanvas.classList.toggle("visible", avatarOn);
       if (avatarOn) {
-        if (reachOn) { reachOn = false; reachBtn.classList.remove("on"); reachCanvas.classList.remove("visible"); }
+        if (reachOn) { reachOn = false; reachBtn.classList.remove("on"); reachCanvas.classList.remove("visible"); document.body.classList.remove("reach-active"); }
         resizeAvatar();
         setStatus("Avatar on — move your body; it mirrors you. Stand back so you're in frame.");
       } else {
@@ -1871,10 +1891,11 @@
       reachOn = !reachOn;
       reachBtn.classList.toggle("on", reachOn);
       reachCanvas.classList.toggle("visible", reachOn);
+      document.body.classList.toggle("reach-active", reachOn);
       if (reachOn) {
         if (avatarOn) { avatarOn = false; avatarBtn.classList.remove("on"); avatarCanvas.classList.remove("visible"); }
         resizeReach();
-        setStatus("Reach on — pinch (thumb + finger) to grab a floating object and move it.");
+        setStatus("Reach on — first-person. Pinch to grab a floating object; twist your hand to turn it.");
       } else {
         setStatus("Reach off.");
       }

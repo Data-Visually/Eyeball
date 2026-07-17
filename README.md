@@ -66,17 +66,21 @@ No build step, no native app, no Xcode — just one `index.html`.
    are EMA-smoothed to tame jitter. Stand back so your body is in view. This
    is a puppet rig (procedural, no external model) — the natural base for
    swapping in a proper VRM avatar later.
-11. **Reach mode** (🫳 toggle): first-person — a **transparent** 3D layer of
-   floating, glowing objects sits over the video, so **your real hands stay
-   visible** underneath and you reach *into* the scene. **Pinch** (thumb +
-   finger) on an object to grab it; both hands work independently. The grab is
-   built to feel physical, not "stuck to a point":
+11. **Reach mode** (🫳 toggle): **first-person, un-mirrored** — the camera and
+   the hand-skeleton overlay flip out of selfie-mirror while Reach is active,
+   so your hands read as reaching *through* the screen, not a reflection. A
+   **transparent** 3D layer of floating, glowing objects sits over the video,
+   your real hands visible underneath. **Pinch** (thumb + finger) on an object
+   to grab it; both hands work independently. The grab is built to feel
+   physical, not "stuck to a point":
    - **Held where you pinched** — a grab offset (stored in hand-local space)
      keeps the object at the spot you grabbed instead of snapping its centre
      to your fingers.
    - **Turns with your hand** — the object's orientation and its offset are
      rotated by a hand quaternion (from wrist→knuckle and thumb→index axes),
-     so twisting your wrist orbits and rotates the held object.
+     so twisting your wrist orbits and rotates the held object. The basis is
+     built explicitly right-handed (xA = yA×zA, zA = xA×yA) so it's always a
+     pure rotation — a left-handed/reflection basis was what squashed the mesh.
    - **Weight + throw** — a spring follow gives it heft, and releasing while
      moving imparts the object's velocity, so it flies and then drifts, bounces
      off invisible walls, and eases back home (light custom physics).
