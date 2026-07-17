@@ -1410,10 +1410,14 @@
     // hand is closer to the camera = reaching further forward, which in this
     // stepped-through view pushes DEEPER into the scene (toward/past the
     // objects). Smaller = pulled back toward the window.
-    const SIZE_NEAR = 0.24, SIZE_FAR = 0.09; // screen span when close / far
-    const Z_NEAR = 2.0, Z_DEEP = -3.2;       // depth toward viewer / into scene
+    const SIZE_NEAR = 0.28, SIZE_FAR = 0.07; // screen span when close / far
+    const Z_NEAR = 2.0, Z_DEEP = -3.4;       // depth toward viewer / into scene
     function handDepth(hand) {
-      const s = Math.hypot(hand[0].x - hand[9].x, hand[0].y - hand[9].y);
+      // Average two spans (wrist→mid-knuckle and index→pinky knuckle) for a
+      // steadier size estimate, less thrown off by wrist tilt.
+      const s1 = Math.hypot(hand[0].x - hand[9].x, hand[0].y - hand[9].y);
+      const s2 = Math.hypot(hand[5].x - hand[17].x, hand[5].y - hand[17].y) * 1.6;
+      const s = (s1 + s2) / 2;
       const f = Math.max(0, Math.min(1, (s - SIZE_FAR) / (SIZE_NEAR - SIZE_FAR)));
       return Z_NEAR + f * (Z_DEEP - Z_NEAR);
     }
@@ -1490,7 +1494,13 @@
         // Depth from apparent hand size, smoothed per hand → reaching forward
         // pushes the hand (and anything it holds) deeper into the scene.
         const rawZ = handDepth(hand);
-        R.handZ[h] = R.handZ[h] == null ? rawZ : R.handZ[h] + (rawZ - R.handZ[h]) * 0.3;
+        if (R.handZ[h] == null) {
+          R.handZ[h] = rawZ;
+        } else {
+          // Speed-adaptive: snappy on deliberate reaches, steady when held.
+          const a = Math.min(0.65, 0.16 + Math.abs(rawZ - R.handZ[h]) * 0.28);
+          R.handZ[h] += (rawZ - R.handZ[h]) * a;
+        }
         const zBase = R.handZ[h];
         updateHand3D(R, R.hands3d[h], hand, worlds[h], zBase);
         const isPinch = grab.obj ? pinchRatio(hand) < 0.42 : pinchRatio(hand) < 0.26;
