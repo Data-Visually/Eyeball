@@ -4,20 +4,21 @@ A running list of deferred improvements and open questions, newest concerns
 first. Not commitments — a place so nothing gets lost between sessions.
 
 ## Reach / hands
-- [ ] **Hand detail** — the current hands are a placeholder built from
-      primitives (spheres + capsules + a palm blob), which reads as a chunky
-      "robot" hand. The real fix is a **rigged glTF/VRM hand mesh** skinned to
-      the 21 landmarks: proper anatomy (thumb origin ~5 o'clock, knuckle
-      creases, tapered fingers, skin). Bigger job — sourcing/hosting a model +
-      bone mapping. Do this when the hands become the focus.
-- [ ] **Mirror / first-person feel** — hands are now mirrored (right hand on
-      your right). Confirm on real hardware it tracks the correct way; if
-      reversed, one-line flip of the `(1 - x)` mapping.
+- [x] **First-person perspective** — DONE. Hands render from MediaPipe *world*
+      landmarks (true 3D) rotated 180° about the vertical ("stepping through
+      the screen"): right hand stays right, palm turns to face into the scene.
+      🔃 Flip-hands toggle swaps the 180° if needed. Confirmed correct on real
+      hardware.
+- [ ] **Hand detail** — the hands are still primitives (spheres + capsules +
+      palm blob), a chunky "robot" look. Real fix: a **rigged glTF/VRM hand
+      mesh** skinned to the landmarks (proper anatomy, skin). Bigger job —
+      sourcing/hosting a model + bone mapping. Do this when looks matter.
 - [ ] **Grab feel tuning** — spring stiffness, throw strength, grab radius,
       pinch thresholds. Needs real-hand feel testing.
-- [ ] **True depth in Reach** — hands currently sit on a plane with a small
-      per-landmark z wobble; grab is screen-space. Consider real 3D depth from
-      hand size / landmark z so reaching "deeper" works.
+- [ ] **Reach depth** — hand shape now has real world-landmark depth, but the
+      hand's overall distance sits on a fixed plane; grab is screen-space.
+      Consider mapping hand distance (size) to depth so reaching "further in"
+      pushes deeper toward the objects.
 
 ## Interaction / features
 - [ ] **Wand** — track the hand/fingertip as a wand tip, buffer the recent
