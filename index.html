@@ -1306,7 +1306,7 @@
         bdir: new THREE.Vector3(), bup: new THREE.Vector3(0, 1, 0),
         bq: new THREE.Quaternion() };
       resizeReach();
-      window.__reachTest = (hands) => updateReach({ landmarks: hands });
+      window.__reachTest = (hands, worlds) => updateReach({ landmarks: hands, worldLandmarks: worlds });
       window.__reachDump = () => reachRig.objects.map((o) =>
         ({ x: +o.position.x.toFixed(2), y: +o.position.y.toFixed(2), grabbedBy: o.userData.grabbedBy }));
       window.__reachProject = (i) => {
@@ -1405,17 +1405,41 @@
     // per-landmark z wobble for finger articulation. x uses image x directly
     // (first-person, un-mirrored) so the visual hand aligns with the grab point.
     const HAND_ZBASE = 0.9;
-    function updateHand3D(R, rig, hand) {
+    const HAND_WSCALE = 12; // world-landmark metres → scene units
+    function updateHand3D(R, rig, hand, world) {
       if (!hand) { rig.group.visible = false; return; }
       rig.group.visible = true;
-      const zs = reachMirror ? 1 : -1;
-      const pts = hand.map((lm) => {
-        const nx = reachMirror ? (1 - lm.x) : lm.x;   // horizontal convention
-        R.htmp.set(nx * 2 - 1, -(lm.y * 2 - 1));
-        const p = rayWorld(R, R.htmp, HAND_ZBASE);
-        p.z += zs * (lm.z || 0) * 6; // z sign tracks x so it stays a rotation
-        return p;
-      });
+
+      let pts;
+      if (world && world.length === 21) {
+        // STEP-THROUGH: use the hand's real 3D shape (world landmarks) and turn
+        // it 180° about the vertical axis — as if you stepped through the
+        // screen and now face away — so palm-toward-camera becomes palm-into-
+        // scene, while your right hand stays a right hand. The sign pair keeps
+        // it a PROPER rotation (chirality preserved); the flip toggle swaps
+        // which 180° so you can land on "stepped through" vs "mirror".
+        const sx = reachMirror ? -1 : 1, sz = reachMirror ? 1 : -1;
+        let cx = 0, cy = 0;
+        for (const lm of hand) { cx += lm.x; cy += lm.y; }
+        cx /= hand.length; cy /= hand.length;
+        const nx = reachMirror ? (1 - cx) : cx;
+        R.htmp.set(nx * 2 - 1, -(cy * 2 - 1));
+        const center = rayWorld(R, R.htmp, HAND_ZBASE);
+        pts = world.map((w) => new THREE.Vector3(
+          center.x + sx * w.x * HAND_WSCALE,
+          center.y - w.y * HAND_WSCALE,
+          center.z + sz * w.z * HAND_WSCALE));
+      } else {
+        // Fallback (no world landmarks): flat screen landmarks.
+        const zs = reachMirror ? 1 : -1;
+        pts = hand.map((lm) => {
+          const nx = reachMirror ? (1 - lm.x) : lm.x;
+          R.htmp.set(nx * 2 - 1, -(lm.y * 2 - 1));
+          const p = rayWorld(R, R.htmp, HAND_ZBASE);
+          p.z += zs * (lm.z || 0) * 6;
+          return p;
+        });
+      }
       for (let i = 0; i < 21; i++) rig.joints[i].position.copy(pts[i]);
       HAND_BONES.forEach((c, i) => setBoneMesh(R, rig.bones[i], pts[c[0]], pts[c[1]]));
 
@@ -1441,11 +1465,12 @@
       if (!R) return;
       R.t += 1;
       const hands = handResult?.landmarks ?? [];
+      const worlds = handResult?.worldLandmarks ?? [];
 
       for (let h = 0; h < 2; h++) {
         const hand = hands[h];
         const grab = R.grab[h];
-        updateHand3D(R, R.hands3d[h], hand); // draw/hide the 3D hand
+        updateHand3D(R, R.hands3d[h], hand, worlds[h]); // draw/hide the 3D hand
         if (!hand) { // hand left frame → let go (keeps any throw velocity)
           if (grab.obj) { grab.obj.userData.grabbedBy = -1; grab.obj = null; }
           continue;
@@ -2034,7 +2059,7 @@
     flipBtn.addEventListener("click", (e) => {
       e.stopPropagation();
       reachMirror = !reachMirror;
-      setStatus(`Hands: ${reachMirror ? "mirrored" : "direct"} mapping.`);
+      setStatus(`Flipped hands (${reachMirror ? "A" : "B"}) — pick the one where your palm points into the scene.`);
     });
 
     window.addEventListener("resize", () => {
