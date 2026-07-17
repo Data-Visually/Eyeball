@@ -15,10 +15,11 @@ first. Not commitments — a place so nothing gets lost between sessions.
       sourcing/hosting a model + bone mapping. Do this when looks matter.
 - [ ] **Grab feel tuning** — spring stiffness, throw strength, grab radius,
       pinch thresholds. Needs real-hand feel testing.
-- [ ] **Reach depth** — hand shape now has real world-landmark depth, but the
-      hand's overall distance sits on a fixed plane; grab is screen-space.
-      Consider mapping hand distance (size) to depth so reaching "further in"
-      pushes deeper toward the objects.
+- [x] **Reach depth** — DONE. Hand distance now maps to scene depth via
+      apparent size (wrist→knuckle span): reach forward → hand (and held
+      objects) go deeper into the scene; pull back → toward the window. All
+      three axes track. Possible refinement: depth-aware grab targeting (grab
+      by true 3D proximity, not just screen position).
 
 ## Interaction / features
 - [ ] **Wand** — track the hand/fingertip as a wand tip, buffer the recent
