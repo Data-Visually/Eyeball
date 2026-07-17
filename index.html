@@ -1335,8 +1335,12 @@
     // a pure rotation. (A left-handed/reflection basis fed to
     // setFromRotationMatrix is what was shearing/squashing the held mesh.)
     function handQuaternion(hand) {
-      // Mirrored x (1 - x) = first-person: your right hand reads on your right.
-      const P = (i) => new THREE.Vector3(1 - hand[i].x, -hand[i].y, -(hand[i].z || 0) * 2);
+      // First-person = 180° rotation about the vertical axis (camera view →
+      // your own viewpoint): flip x AND z together. That's a PROPER rotation,
+      // so the hand keeps its real chirality (a right hand looks like a right
+      // hand) while landing on the correct side. +z (not -z) is what makes it
+      // a rotation rather than a reflection (which mirror-imaged the hand).
+      const P = (i) => new THREE.Vector3(1 - hand[i].x, -hand[i].y, (hand[i].z || 0) * 2);
       const yA = P(9).sub(P(0));            // wrist → middle knuckle = "up"
       if (yA.lengthSq() < 1e-8) return new THREE.Quaternion();
       yA.normalize();
@@ -1388,9 +1392,10 @@
       if (!hand) { rig.group.visible = false; return; }
       rig.group.visible = true;
       const pts = hand.map((lm) => {
-        R.htmp.set((1 - lm.x) * 2 - 1, -(lm.y * 2 - 1)); // first-person mirror
+        R.htmp.set((1 - lm.x) * 2 - 1, -(lm.y * 2 - 1)); // x flip → correct side
         const p = rayWorld(R, R.htmp, HAND_ZBASE);
-        p.z += -(lm.z || 0) * 6; // finger depth relative to wrist
+        p.z += (lm.z || 0) * 6; // +z flip: makes x+z a PROPER rotation (AR/VR
+                                // first-person), not a chirality-flipping mirror
         return p;
       });
       for (let i = 0; i < 21; i++) rig.joints[i].position.copy(pts[i]);
