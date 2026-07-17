@@ -58,7 +58,15 @@ No build step, no native app, no Xcode — just one `index.html`.
      produce no drift), and smoothing, plus a **Tiles on/off sandbox** and a
      **Re-center** button. A throttled readout shows the live tracked movement
      and view shift.
-10. **Look and Tap**: after calibrating, a green gaze cursor follows your eyes
+10. **Avatar mode** (🕺 toggle): lazy-loads **Three.js** and MediaPipe's
+   **Pose Landmarker** (33-point body skeleton) and renders a **3D figure that
+   mirrors your whole body** on a dark stage — capsule bones, sphere joints,
+   a head. It's driven by the pose *world landmarks* (metric, hip-centred), so
+   the figure is stable regardless of where you are in the frame; positions
+   are EMA-smoothed to tame jitter. Stand back so your body is in view. This
+   is a puppet rig (procedural, no external model) — the natural base for
+   swapping in a proper VRM avatar later.
+11. **Look and Tap**: after calibrating, a green gaze cursor follows your eyes
    across a grid of app tiles. The tile you're looking at lights up; tapping
    **anywhere** on the screen selects it (with haptic feedback where
    supported). Look chooses, tap confirms.

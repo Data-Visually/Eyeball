@@ -43,6 +43,28 @@
       transform: scaleX(-1);
     }
     #overlay { z-index: 2; pointer-events: none; }
+    /* Avatar stage: an opaque WebGL canvas that covers the video when the
+       skeleton-driven 3D figure is on. */
+    #avatarCanvas {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 4;
+      display: none;
+      pointer-events: none;
+    }
+    #avatarCanvas.visible { display: block; }
+    #avatarBtn {
+      top: calc(max(18px, env(safe-area-inset-top)) + 138px);
+      bottom: auto;
+      right: 16px;
+      background: rgba(255, 255, 255, 0.85);
+      color: #000;
+      font-size: 13px;
+      padding: 9px 14px;
+    }
+    #avatarBtn.on { background: #ff7ad9; color: #45002f; }
 
     /* ---------- Look & Tap targets ---------- */
     #targets {
@@ -375,6 +397,7 @@
   -->
   <video id="video" autoplay muted playsinline webkit-playsinline></video>
   <canvas id="overlay"></canvas>
+  <canvas id="avatarCanvas"></canvas>
 
   <div id="targets" aria-hidden="true">
     <div id="room">
@@ -396,6 +419,7 @@
   <button id="handsBtn" class="ctl">🖐 Hands</button>
   <button id="threeDBtn" class="ctl">🧊 3D</button>
   <button id="settingsBtn" class="ctl">⚙️ Tune</button>
+  <button id="avatarBtn" class="ctl">🕺 Avatar</button>
   <div id="settings">
     <h4>🎛 WINDOW TUNING</h4>
     <label>Room depth <span id="v_roomDepthM"></span></label>
@@ -424,9 +448,15 @@
     import {
       FaceLandmarker,
       HandLandmarker,
+      PoseLandmarker,
       FilesetResolver,
       DrawingUtils
     } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+    // Three.js is loaded lazily (only when Avatar mode is first enabled) so it
+    // never weighs down initial page load. Same CDN as tasks-vision.
+    const THREE_URL = "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+    let THREE = null;
 
     // ---------------------------------------------------------------------
     // Landmark indices (MediaPipe Face Landmarker, 478-point refined mesh).
@@ -479,6 +509,7 @@
     const sceneEl      = document.getElementById("scene");
     const roomEl       = document.getElementById("room");
     const settingsBtn  = document.getElementById("settingsBtn");
+    const avatarBtn    = document.getElementById("avatarBtn");
     const settingsPanel = document.getElementById("settings");
     const readoutEl    = document.getElementById("readout");
     const tilesToggleBtn = document.getElementById("tilesToggle");
@@ -514,6 +545,14 @@
     let handLoading = false;
     let pinched = false;        // pinch state with hysteresis
     let pointedTile = null;     // tile currently under the index fingertip
+
+    // Avatar (full-body skeleton → 3D figure). Lazy-loaded on first toggle.
+    const avatarCanvas = document.getElementById("avatarCanvas");
+    let poseLandmarker = null;
+    let avatarOn = false;
+    let avatarLoading = false;
+    let avatarRig = null;       // Three.js scene objects, built once
+    const poseSmooth = [];      // EMA-smoothed world landmark positions
 
     // 3D mode: tiles float INSIDE the corridor (all depths behind the screen
     // plane), camera coupled to the viewer's tracked eye — a window into a
@@ -625,6 +664,26 @@
         console.warn("[Eyeball] Hand GPU delegate failed, retrying with CPU:", gpuErr);
         options.baseOptions.delegate = "CPU";
         return await HandLandmarker.createFromOptions(filesetResolver, options);
+      }
+    }
+
+    async function createPoseLandmarker() {
+      const options = {
+        baseOptions: {
+          modelAssetPath:
+            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+          delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numPoses: 1
+      };
+      const filesetResolver = await getVision();
+      try {
+        return await PoseLandmarker.createFromOptions(filesetResolver, options);
+      } catch (gpuErr) {
+        console.warn("[Eyeball] Pose GPU delegate failed, retrying with CPU:", gpuErr);
+        options.baseOptions.delegate = "CPU";
+        return await PoseLandmarker.createFromOptions(filesetResolver, options);
       }
     }
 
@@ -833,6 +892,7 @@
       modeToggle.classList.remove("visible");
       handsBtn.classList.remove("visible");
       threeDBtn.classList.remove("visible");
+      avatarBtn.classList.remove("visible");
       targetsEl.classList.remove("visible");
       gazeCursor.style.display = "none";
       cal = null;
@@ -882,6 +942,7 @@
         modeToggle.classList.add("visible");
         handsBtn.classList.add("visible");
         threeDBtn.classList.add("visible");
+        avatarBtn.classList.add("visible");
         return;
       }
       console.log(
@@ -1007,6 +1068,111 @@
       buildRings();
     }
 
+    // ---------------------- AVATAR (skeleton → 3D figure) ----------------------
+    // MediaPipe Pose gives 33 landmarks. These bone pairs connect them into a
+    // body; joints get spheres, bones get capsules. Indices: 11/12 shoulders,
+    // 13/14 elbows, 15/16 wrists, 23/24 hips, 25/26 knees, 27/28 ankles, 0 nose.
+    const POSE_BONES = [
+      [11, 12], [11, 23], [12, 24], [23, 24],   // shoulders, torso sides, hips
+      [11, 13], [13, 15],                        // left arm
+      [12, 14], [14, 16],                        // right arm
+      [23, 25], [25, 27],                        // left leg
+      [24, 26], [26, 28]                         // right leg
+    ];
+    const POSE_JOINTS = [0, 11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28];
+    const AV_SCALE = 3.6; // world-metres → scene units, tuned to fill the view
+
+    async function buildAvatarScene() {
+      const renderer = new THREE.WebGLRenderer({ canvas: avatarCanvas, antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x04120a);
+      const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+      camera.position.set(0, 0, 8);
+      scene.add(new THREE.AmbientLight(0x88ffcc, 0.6));
+      const key = new THREE.DirectionalLight(0xffffff, 1.1);
+      key.position.set(2, 4, 5);
+      scene.add(key);
+      const group = new THREE.Group();
+      group.position.y = 0.5; // hips sit near y=0; nudge up so the figure centres
+      scene.add(group);
+
+      const boneMat = new THREE.MeshStandardMaterial(
+        { color: 0x00e58c, roughness: 0.35, metalness: 0.2, emissive: 0x003b25 });
+      const jointMat = new THREE.MeshStandardMaterial(
+        { color: 0xff7ad9, roughness: 0.3, emissive: 0x3a0026 });
+      const headMat = new THREE.MeshStandardMaterial(
+        { color: 0xaef7d6, roughness: 0.4, emissive: 0x0a3a26 });
+
+      const bones = POSE_BONES.map(() => {
+        const m = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 1, 14), boneMat);
+        group.add(m); return m;
+      });
+      const joints = POSE_JOINTS.map((idx) => {
+        const r = idx === 0 ? 0.42 : 0.18;
+        const m = new THREE.Mesh(new THREE.SphereGeometry(r, 20, 16),
+          idx === 0 ? headMat : jointMat);
+        group.add(m); return m;
+      });
+
+      avatarRig = { renderer, scene, camera, group, bones, joints,
+        up: new THREE.Vector3(0, 1, 0), a: new THREE.Vector3(),
+        b: new THREE.Vector3(), mid: new THREE.Vector3(),
+        dir: new THREE.Vector3(), q: new THREE.Quaternion() };
+      resizeAvatar();
+      // Test hook: lets an automated check drive the rig with a synthetic pose
+      // (harmless in normal use).
+      window.__avatarTest = (w) => updateAvatar(w);
+    }
+
+    function resizeAvatar() {
+      if (!avatarRig) return;
+      const w = avatarCanvas.clientWidth || window.innerWidth;
+      const h = avatarCanvas.clientHeight || window.innerHeight;
+      avatarRig.renderer.setSize(w, h, false);
+      avatarRig.camera.aspect = w / h;
+      avatarRig.camera.updateProjectionMatrix();
+    }
+
+    // Orient a unit cylinder (default axis +Y) to span points a→b.
+    function setBone(mesh, a, b) {
+      const R = avatarRig;
+      R.a.set(a[0], a[1], a[2]);
+      R.b.set(b[0], b[1], b[2]);
+      R.mid.addVectors(R.a, R.b).multiplyScalar(0.5);
+      R.dir.subVectors(R.b, R.a);
+      const len = R.dir.length() || 1e-4;
+      mesh.position.copy(R.mid);
+      mesh.scale.set(1, len, 1);
+      R.q.setFromUnitVectors(R.up, R.dir.normalize());
+      mesh.quaternion.copy(R.q);
+    }
+
+    // Map a pose WORLD landmark (metres, hip-centred) to scene space. Mirror x
+    // for the selfie view; negate y (image y-down → scene y-up); scale.
+    function worldPt(l) {
+      return [-l.x * AV_SCALE, -l.y * AV_SCALE, -l.z * AV_SCALE];
+    }
+
+    function updateAvatar(world) {
+      if (!avatarRig || !world) return;
+      // EMA-smooth each landmark to tame jitter.
+      for (let i = 0; i < world.length; i++) {
+        const p = worldPt(world[i]);
+        const s = poseSmooth[i] || (poseSmooth[i] = p.slice());
+        for (let k = 0; k < 3; k++) s[k] += (p[k] - s[k]) * 0.45;
+      }
+      POSE_BONES.forEach((c, i) => {
+        const a = poseSmooth[c[0]], b = poseSmooth[c[1]];
+        if (a && b) setBone(avatarRig.bones[i], a, b);
+      });
+      POSE_JOINTS.forEach((idx, i) => {
+        const p = poseSmooth[idx];
+        if (p) avatarRig.joints[i].position.set(p[0], p[1], p[2]);
+      });
+      avatarRig.renderer.render(avatarRig.scene, avatarRig.camera);
+    }
+
     function enterGazeMode() {
       mode = "gaze";
       targetsEl.classList.add("visible");
@@ -1015,6 +1181,7 @@
       modeToggle.classList.add("visible");
       handsBtn.classList.add("visible");
       threeDBtn.classList.add("visible");
+      avatarBtn.classList.add("visible");
       const quality = cal && cal.rms < 0.06 ? "good" : "rough — consider recalibrating";
       setStatus(`Calibrated (fit: ${quality}). Look at a tile, tap ANYWHERE to select.`);
     }
@@ -1240,6 +1407,19 @@
             pointedTile = pointedNow;
           }
         }
+
+        // ---------------- AVATAR (body skeleton → 3D figure) ----------------
+        if (avatarOn && poseLandmarker && avatarRig) {
+          let pres = null;
+          try {
+            pres = poseLandmarker.detectForVideo(video, performance.now());
+          } catch (err) {
+            console.error("[Eyeball] pose detectForVideo failed:", err);
+          }
+          // worldLandmarks are metric (metres, hip-centred) — ideal for a 3D
+          // figure, independent of where the body sits in the frame.
+          updateAvatar(pres?.worldLandmarks?.[0]);
+        }
       }
 
       // Prefer requestVideoFrameCallback (fires exactly once per camera
@@ -1263,6 +1443,7 @@
         modeToggle.classList.add("visible");
         handsBtn.classList.add("visible");
         threeDBtn.classList.add("visible");
+        avatarBtn.classList.add("visible");
         setStatus("Tracking… green dots = iris centers. Pick a mode, then Calibrate.");
         renderLoop();
       } catch (err) {
@@ -1416,6 +1597,40 @@
       headBaseline = null; // recapture on the next frame
       setStatus("Re-centered on your current position.");
     });
+
+    // Avatar toggle: lazy-load Three.js + the Pose model, build the rig once,
+    // then mirror your whole body live on a 3D stage.
+    avatarBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+    avatarBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!avatarRig) {
+        if (avatarLoading) return;
+        avatarLoading = true;
+        setStatus("Loading 3D engine and body-tracking model…");
+        try {
+          if (!THREE) THREE = await import(THREE_URL);
+          if (!poseLandmarker) poseLandmarker = await createPoseLandmarker();
+          await buildAvatarScene();
+        } catch (err) {
+          console.error("[Eyeball] Avatar init error:", err);
+          setStatus("Failed to load the avatar (3D engine or model). Check network.", true);
+          avatarLoading = false;
+          return;
+        }
+        avatarLoading = false;
+      }
+      avatarOn = !avatarOn;
+      avatarBtn.classList.toggle("on", avatarOn);
+      avatarCanvas.classList.toggle("visible", avatarOn);
+      if (avatarOn) {
+        resizeAvatar();
+        setStatus("Avatar on — move your body; it mirrors you. Stand back so you're in frame.");
+      } else {
+        setStatus("Avatar off.");
+      }
+    });
+
+    window.addEventListener("resize", () => { if (avatarOn) resizeAvatar(); });
   </script>
 </body>
 </html>
