@@ -1261,12 +1261,17 @@
         scene.add(g);
         const joints = Array.from({ length: 21 }, (_, i) => {
           const tip = i === 4 || i === 8 || i === 12 || i === 16 || i === 20;
-          const r = i === 0 ? 0.13 : (tip ? 0.075 : 0.07);
+          const r = i === 0 ? 0.08 : (tip ? 0.05 : 0.048);
           const m = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 12), tip ? skinTip : skinMat);
           g.add(m); return m;
         });
-        const bones = HAND_BONES.map(() => {
-          const m = new THREE.Mesh(new THREE.CylinderGeometry(0.062, 0.062, 1, 12), skinMat);
+        // Palm-crossing connectors ([0,5],[5,9],[9,13],[13,17],[0,17]) are
+        // covered by the palm pad, so draw them thin; finger segments a touch
+        // thicker. Keeps the hand from looking like balloon animals.
+        const PALM_BONES = new Set([4, 8, 12, 16, 20]); // indices into HAND_BONES
+        const bones = HAND_BONES.map((_, i) => {
+          const r = PALM_BONES.has(i) ? 0.02 : 0.038;
+          const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 1, 10), skinMat);
           g.add(m); return m;
         });
         const palm = new THREE.Mesh(new THREE.SphereGeometry(1, 18, 14), skinMat);
@@ -1397,15 +1402,15 @@
       palm.position.copy(pts[0]).add(pts[5]).add(pts[9]).add(pts[13]).add(pts[17]).multiplyScalar(1 / 5);
       const up = R.bmid.subVectors(pts[9], pts[0]);      // wrist → middle knuckle
       const across = R.bdir.subVectors(pts[5], pts[17]);  // index → pinky knuckle
-      const width = across.length() * 0.62;
-      const height = up.length() * 0.7;
+      const width = across.length() * 0.5;
+      const height = up.length() * 0.62;
       let n = new THREE.Vector3().crossVectors(up, across);
       if (n.lengthSq() < 1e-8) n.set(0, 0, 1); else n.normalize();
       const yA = up.clone().normalize();
       const xA = new THREE.Vector3().crossVectors(yA, n).normalize();
       const zA = new THREE.Vector3().crossVectors(xA, yA).normalize();
       palm.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(xA, yA, zA));
-      palm.scale.set(Math.max(width, 0.05), Math.max(height, 0.05), 0.16);
+      palm.scale.set(Math.max(width, 0.05), Math.max(height, 0.05), 0.1);
     }
 
     function updateReach(handResult) {
