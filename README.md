@@ -66,13 +66,12 @@ No build step, no native app, no Xcode — just one `index.html`.
    are EMA-smoothed to tame jitter. Stand back so your body is in view. This
    is a puppet rig (procedural, no external model) — the natural base for
    swapping in a proper VRM avatar later.
-11. **Reach mode** (🫳 toggle): **first-person, un-mirrored** — the camera and
-   the hand-skeleton overlay flip out of selfie-mirror while Reach is active,
-   so your hands read as reaching *through* the screen, not a reflection. A
-   **transparent** 3D layer of floating, glowing objects sits over the video,
-   your real hands visible underneath. **Pinch** (thumb + finger) on an object
-   to grab it; both hands work independently. The grab is built to feel
-   physical, not "stuck to a point":
+11. **Reach mode** (🫳 toggle): **first-person, fully virtual** — an opaque
+   dark stage (no camera feed of you), with **3D skin-toned hands** rendered
+   live from the 21 hand landmarks (palm, segmented fingers, knuckles),
+   reaching in among floating glowing objects. **Pinch** (thumb + finger) on
+   an object to grab it; both hands work independently. The grab is built to
+   feel physical, not "stuck to a point":
    - **Held where you pinched** — a grab offset (stored in hand-local space)
      keeps the object at the spot you grabbed instead of snapping its centre
      to your fingers.

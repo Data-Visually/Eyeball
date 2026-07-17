@@ -1213,9 +1213,9 @@
 
     // ---------------------- REACH (grab 3D objects, first-person) ----------------------
     async function buildReachScene() {
-      const renderer = new THREE.WebGLRenderer({ canvas: reachCanvas, antialias: true, alpha: true });
+      const renderer = new THREE.WebGLRenderer({ canvas: reachCanvas, antialias: true });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-      renderer.setClearColor(0x000000, 0); // transparent → real hands show through
+      renderer.setClearColor(0x06140d, 1); // opaque dark stage — camera feed hidden
       const scene = new THREE.Scene();
       const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
       camera.position.set(0, 0, 5);
@@ -1247,11 +1247,41 @@
         return m;
       });
 
-      reachRig = { renderer, scene, camera, objects,
+      // Two solid, skin-toned 3D hands, built once and posed per frame from
+      // the landmarks: rounded knuckles (spheres), chunky finger segments
+      // (capsules), and a filled palm pad — an avatar hand, not a skeleton.
+      const skinMat = new THREE.MeshStandardMaterial({ color: 0xe3ac8b, emissive: 0x2a1408, emissiveIntensity: 0.35, roughness: 0.65, metalness: 0.05 });
+      const skinTip = new THREE.MeshStandardMaterial({ color: 0xe8b89a, emissive: 0x2a1408, emissiveIntensity: 0.35, roughness: 0.6 });
+      const capsule = (r, len) => (THREE.CapsuleGeometry
+        ? new THREE.CapsuleGeometry(r, len, 4, 10)
+        : new THREE.CylinderGeometry(r, r, len, 12));
+      const hands3d = [0, 1].map(() => {
+        const g = new THREE.Group();
+        g.visible = false;
+        scene.add(g);
+        const joints = Array.from({ length: 21 }, (_, i) => {
+          const tip = i === 4 || i === 8 || i === 12 || i === 16 || i === 20;
+          const r = i === 0 ? 0.13 : (tip ? 0.075 : 0.07);
+          const m = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 12), tip ? skinTip : skinMat);
+          g.add(m); return m;
+        });
+        const bones = HAND_BONES.map(() => {
+          const m = new THREE.Mesh(new THREE.CylinderGeometry(0.062, 0.062, 1, 12), skinMat);
+          g.add(m); return m;
+        });
+        const palm = new THREE.Mesh(new THREE.SphereGeometry(1, 18, 14), skinMat);
+        g.add(palm);
+        return { group: g, joints, bones, palm };
+      });
+
+      reachRig = { renderer, scene, camera, objects, hands3d,
         raycaster: new THREE.Raycaster(), ndc: new THREE.Vector2(),
         proj: new THREE.Vector3(), t: 0,
         bounds: [2.7, 1.8, 1.2], // x/y/z half-extents the objects bounce inside
-        grab: [{ obj: null }, { obj: null }] };
+        grab: [{ obj: null }, { obj: null }],
+        htmp: new THREE.Vector2(), bmid: new THREE.Vector3(),
+        bdir: new THREE.Vector3(), bup: new THREE.Vector3(0, 1, 0),
+        bq: new THREE.Quaternion() };
       resizeReach();
       window.__reachTest = (hands) => updateReach({ landmarks: hands });
       window.__reachDump = () => reachRig.objects.map((o) =>
@@ -1259,6 +1289,15 @@
       window.__reachProject = (i) => {
         const v = reachRig.objects[i].position.clone().project(reachRig.camera);
         return { ndcX: v.x, ndcY: v.y }; // → image coords: mx=(ndcX+1)/2, my=(1-ndcY)/2
+      };
+      window.__reachHandsVisible = () => reachRig.hands3d.map((h) => h.group.visible);
+      window.__reachHandInfo = () => {
+        const r = reachRig.hands3d[0];
+        const j = (i) => { const p = r.joints[i].position; return [+p.x.toFixed(2), +p.y.toFixed(2), +p.z.toFixed(2)]; };
+        const ps = r.palm.scale;
+        return { wrist: j(0), indexTip: j(8), midTip: j(12),
+          palm: [+r.palm.position.x.toFixed(2), +r.palm.position.y.toFixed(2), +r.palm.position.z.toFixed(2)],
+          palmScale: [+ps.x.toFixed(2), +ps.y.toFixed(2), +ps.z.toFixed(2)] };
       };
       window.__reachInspect = () => {
         const o = reachRig.objects.find((x) => x.userData.grabbedBy >= 0) || reachRig.objects[0];
@@ -1304,12 +1343,68 @@
         new THREE.Matrix4().makeBasis(xA, yA, zA));
     }
 
-    // Screen pinch point → a world point on the plane z = depth.
-    function pinchWorld(R, depth) {
-      R.raycaster.setFromCamera(R.ndc, R.camera);
+    // Standard 21-point hand skeleton bone pairs.
+    const HAND_BONES = [
+      [0,1],[1,2],[2,3],[3,4],        // thumb
+      [0,5],[5,6],[6,7],[7,8],        // index
+      [5,9],[9,10],[10,11],[11,12],   // middle
+      [9,13],[13,14],[14,15],[15,16], // ring
+      [13,17],[17,18],[18,19],[19,20],// pinky
+      [0,17]                          // palm base
+    ];
+
+    // Screen NDC → a world point on the plane z = depth (camera ray intersect).
+    function rayWorld(R, ndc, depth) {
+      R.raycaster.setFromCamera(ndc, R.camera);
       const ro = R.raycaster.ray.origin, rd = R.raycaster.ray.direction;
       const t = (depth - ro.z) / rd.z;
       return new THREE.Vector3(ro.x + rd.x * t, ro.y + rd.y * t, depth);
+    }
+    const pinchWorld = (R, depth) => rayWorld(R, R.ndc, depth);
+
+    // Orient a unit cylinder to span a→b (reach rig temps).
+    function setBoneMesh(R, mesh, a, b) {
+      R.bmid.addVectors(a, b).multiplyScalar(0.5);
+      R.bdir.subVectors(b, a);
+      const len = R.bdir.length() || 1e-4;
+      mesh.position.copy(R.bmid);
+      mesh.scale.set(1, len, 1);
+      R.bq.setFromUnitVectors(R.bup, R.bdir.clone().normalize());
+      mesh.quaternion.copy(R.bq);
+    }
+
+    // Position a 3D hand rig from the 21 landmarks. Joints are placed on a
+    // plane in front of the objects (so hands reach IN toward them), with a
+    // per-landmark z wobble for finger articulation. x uses image x directly
+    // (first-person, un-mirrored) so the visual hand aligns with the grab point.
+    const HAND_ZBASE = 0.9;
+    function updateHand3D(R, rig, hand) {
+      if (!hand) { rig.group.visible = false; return; }
+      rig.group.visible = true;
+      const pts = hand.map((lm) => {
+        R.htmp.set(lm.x * 2 - 1, -(lm.y * 2 - 1));
+        const p = rayWorld(R, R.htmp, HAND_ZBASE);
+        p.z += -(lm.z || 0) * 6; // finger depth relative to wrist
+        return p;
+      });
+      for (let i = 0; i < 21; i++) rig.joints[i].position.copy(pts[i]);
+      HAND_BONES.forEach((c, i) => setBoneMesh(R, rig.bones[i], pts[c[0]], pts[c[1]]));
+
+      // Palm pad: an ellipsoid at the palm centroid, oriented to the hand and
+      // flattened, filling the space between wrist and knuckles.
+      const palm = rig.palm;
+      palm.position.copy(pts[0]).add(pts[5]).add(pts[9]).add(pts[13]).add(pts[17]).multiplyScalar(1 / 5);
+      const up = R.bmid.subVectors(pts[9], pts[0]);      // wrist → middle knuckle
+      const across = R.bdir.subVectors(pts[5], pts[17]);  // index → pinky knuckle
+      const width = across.length() * 0.62;
+      const height = up.length() * 0.7;
+      let n = new THREE.Vector3().crossVectors(up, across);
+      if (n.lengthSq() < 1e-8) n.set(0, 0, 1); else n.normalize();
+      const yA = up.clone().normalize();
+      const xA = new THREE.Vector3().crossVectors(yA, n).normalize();
+      const zA = new THREE.Vector3().crossVectors(xA, yA).normalize();
+      palm.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(xA, yA, zA));
+      palm.scale.set(Math.max(width, 0.05), Math.max(height, 0.05), 0.16);
     }
 
     function updateReach(handResult) {
@@ -1321,6 +1416,7 @@
       for (let h = 0; h < 2; h++) {
         const hand = hands[h];
         const grab = R.grab[h];
+        updateHand3D(R, R.hands3d[h], hand); // draw/hide the 3D hand
         if (!hand) { // hand left frame → let go (keeps any throw velocity)
           if (grab.obj) { grab.obj.userData.grabbedBy = -1; grab.obj = null; }
           continue;
