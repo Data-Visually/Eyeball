@@ -1301,7 +1301,7 @@
         raycaster: new THREE.Raycaster(), ndc: new THREE.Vector2(),
         proj: new THREE.Vector3(), t: 0,
         bounds: [2.7, 1.8, 1.2], // x/y/z half-extents the objects bounce inside
-        grab: [{ obj: null }, { obj: null }],
+        grab: [{ obj: null }, { obj: null }], handZ: [null, null],
         htmp: new THREE.Vector2(), bmid: new THREE.Vector3(),
         bdir: new THREE.Vector3(), bup: new THREE.Vector3(0, 1, 0),
         bq: new THREE.Quaternion() };
@@ -1406,9 +1406,21 @@
     // (first-person, un-mirrored) so the visual hand aligns with the grab point.
     const HAND_ZBASE = 0.9;
     const HAND_WSCALE = 12; // world-landmark metres → scene units
-    function updateHand3D(R, rig, hand, world) {
+    // Depth from apparent hand size (wrist→knuckle span in the image): a bigger
+    // hand is closer to the camera = reaching further forward, which in this
+    // stepped-through view pushes DEEPER into the scene (toward/past the
+    // objects). Smaller = pulled back toward the window.
+    const SIZE_NEAR = 0.24, SIZE_FAR = 0.09; // screen span when close / far
+    const Z_NEAR = 2.0, Z_DEEP = -3.2;       // depth toward viewer / into scene
+    function handDepth(hand) {
+      const s = Math.hypot(hand[0].x - hand[9].x, hand[0].y - hand[9].y);
+      const f = Math.max(0, Math.min(1, (s - SIZE_FAR) / (SIZE_NEAR - SIZE_FAR)));
+      return Z_NEAR + f * (Z_DEEP - Z_NEAR);
+    }
+    function updateHand3D(R, rig, hand, world, zBase) {
       if (!hand) { rig.group.visible = false; return; }
       rig.group.visible = true;
+      const z0 = zBase ?? HAND_ZBASE;
 
       let pts;
       if (world && world.length === 21) {
@@ -1424,7 +1436,7 @@
         cx /= hand.length; cy /= hand.length;
         const nx = reachMirror ? (1 - cx) : cx;
         R.htmp.set(nx * 2 - 1, -(cy * 2 - 1));
-        const center = rayWorld(R, R.htmp, HAND_ZBASE);
+        const center = rayWorld(R, R.htmp, z0); // z0 = depth from hand size
         pts = world.map((w) => new THREE.Vector3(
           center.x + sx * w.x * HAND_WSCALE,
           center.y - w.y * HAND_WSCALE,
@@ -1435,7 +1447,7 @@
         pts = hand.map((lm) => {
           const nx = reachMirror ? (1 - lm.x) : lm.x;
           R.htmp.set(nx * 2 - 1, -(lm.y * 2 - 1));
-          const p = rayWorld(R, R.htmp, HAND_ZBASE);
+          const p = rayWorld(R, R.htmp, z0);
           p.z += zs * (lm.z || 0) * 6;
           return p;
         });
@@ -1470,11 +1482,17 @@
       for (let h = 0; h < 2; h++) {
         const hand = hands[h];
         const grab = R.grab[h];
-        updateHand3D(R, R.hands3d[h], hand, worlds[h]); // draw/hide the 3D hand
         if (!hand) { // hand left frame → let go (keeps any throw velocity)
+          updateHand3D(R, R.hands3d[h], null);
           if (grab.obj) { grab.obj.userData.grabbedBy = -1; grab.obj = null; }
           continue;
         }
+        // Depth from apparent hand size, smoothed per hand → reaching forward
+        // pushes the hand (and anything it holds) deeper into the scene.
+        const rawZ = handDepth(hand);
+        R.handZ[h] = R.handZ[h] == null ? rawZ : R.handZ[h] + (rawZ - R.handZ[h]) * 0.3;
+        const zBase = R.handZ[h];
+        updateHand3D(R, R.hands3d[h], hand, worlds[h], zBase);
         const isPinch = grab.obj ? pinchRatio(hand) < 0.42 : pinchRatio(hand) < 0.26;
 
         // Pinch midpoint → NDC, using the same horizontal convention as the
@@ -1497,10 +1515,9 @@
             grab.obj = best;
             best.userData.grabbedBy = h;
             best.userData.vel.set(0, 0, 0);
-            grab.depth = best.position.z;
-            const pw = pinchWorld(R, grab.depth);
-            // Preserve WHERE on the object you pinched, in hand-local space, so
-            // it doesn't teleport its centre to your fingers…
+            const pw = pinchWorld(R, zBase); // grab at the hand's current depth
+            // Preserve WHERE on the object you pinched, in hand-local space
+            // (incl. its depth offset), so it doesn't teleport to your fingers…
             grab.offset = best.position.clone().sub(pw)
               .applyQuaternion(handQ.clone().invert());
             // …and preserve its orientation relative to the hand.
@@ -1511,7 +1528,7 @@
 
         if (grab.obj && isPinch) {
           const o = grab.obj;
-          const target = pinchWorld(R, grab.depth)
+          const target = pinchWorld(R, zBase)  // follows the hand in depth too
             .add(grab.offset.clone().applyQuaternion(handQ)); // orbit with hand
           grab.prev.copy(o.position);
           o.position.lerp(target, 0.5);                       // spring → weight
