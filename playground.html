@@ -1,0 +1,1151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <!--
+    Playground page: a self-contained sandbox for experimenting with gaze
+    accuracy. It owns its OWN copy of the MediaPipe setup, feature extraction,
+    and regression — the canonical index.html stays frozen as the baseline.
+    Reached at /playground.html (direct URL); "← Main" returns to the prototype.
+  -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Eyeball — Playground</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      overflow: hidden; background: #000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      -webkit-user-select: none; user-select: none; touch-action: manipulation;
+      color: #fff;
+    }
+
+    /* Video + canvas stacked full-screen, identical object-fit + mirror so
+       drawn landmarks stay pixel-registered with the video (same trick as the
+       main prototype). See index.html for the rationale. */
+    #video, #overlay {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      object-fit: cover; transform: scaleX(-1);
+    }
+    #overlay { z-index: 2; pointer-events: none; }
+
+    /* ------------------------- Top bar ------------------------- */
+    #topbar {
+      position: fixed; z-index: 9;
+      top: max(8px, env(safe-area-inset-top)); left: 8px; right: 8px;
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      pointer-events: none;
+    }
+    #topbar > * { pointer-events: auto; }
+    .tb-link, .tb-btn {
+      background: rgba(0,0,0,0.65); color: #fff;
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 999px; padding: 7px 12px; font-size: 13px;
+      text-decoration: none; cursor: pointer; white-space: nowrap;
+    }
+    .tb-link:hover, .tb-btn:hover { background: rgba(40,40,40,0.85); }
+    #modes { display: flex; gap: 4px; }
+    .tb-btn.active { background: #00c838; color: #002a0c; border-color: #00c838; }
+    #calibrateBtn { background: #ffcc00; color: #2a1f00; border-color: #ffcc00; font-weight: 600; }
+    #calibrateBtn:hover { background: #ffd633; }
+    .spacer { flex: 1; }
+
+    /* ------------------------- Panels ------------------------- */
+    .panel {
+      position: fixed; z-index: 8;
+      bottom: max(12px, env(safe-area-inset-bottom));
+      max-height: 46vh; width: min(320px, 92vw);
+      overflow: auto;
+      background: rgba(10,12,16,0.82);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 14px; padding: 12px 14px; font-size: 13px;
+      backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+      display: none;
+    }
+    .panel.visible { display: block; }
+    #labPanel         { left: 8px; }
+    #comparePanel     { left: 8px; }
+    #vizPanel         { right: 8px; }
+    #continuousPanel  { left: 50%; transform: translateX(-50%); width: min(440px, 92vw); }
+    .panel h3 { margin: 0 0 8px; font-size: 13px; letter-spacing: 0.4px;
+                text-transform: uppercase; color: #00ff88; }
+    .panel .row { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
+    .panel label { display: flex; align-items: center; gap: 7px; cursor: pointer; padding: 3px 0; }
+    .panel input[type="checkbox"] { width: 16px; height: 16px; accent-color: #00c838; }
+    .panel .sub { color: #9aa; font-size: 11px; }
+    .panel hr { border: 0; border-top: 1px solid rgba(255,255,255,0.12); margin: 8px 0; }
+    .readout { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+               background: rgba(0,0,0,0.4); padding: 7px 9px; border-radius: 8px;
+               white-space: pre-wrap; line-height: 1.5; }
+    .readout .good { color: #00ff88; }
+    .readout .bad  { color: #ff7a7a; }
+    .readout .dim  { color: #9aa; }
+
+    /* Blendshape bars (visualizer) */
+    .bar-row { display: grid; grid-template-columns: 92px 1fr 34px; align-items: center; gap: 6px; margin: 3px 0; font-size: 11px; }
+    .bar-track { height: 8px; background: rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden; }
+    .bar-fill { height: 100%; width: 0%; background: #00c838; transition: width 0.05s linear; }
+    .bar-val { text-align: right; color: #9aa; font-family: ui-monospace, monospace; }
+
+    /* ------------------------- Gaze cursors ------------------------- */
+    .gcursor {
+      position: fixed; z-index: 5; left: 0; top: 0;
+      width: 32px; height: 32px; margin: -16px 0 0 -16px;
+      border-radius: 50%; pointer-events: none; display: none; will-change: transform;
+    }
+    #gazeCursorA { border: 3px solid #00ff44;
+                   box-shadow: 0 0 14px rgba(0,255,68,0.8), inset 0 0 8px rgba(0,255,68,0.5); }
+    #gazeCursorB { border: 3px dashed #ff48d1;
+                   box-shadow: 0 0 14px rgba(255,72,209,0.7); }
+    .gcursor-tag {
+      position: absolute; top: -18px; left: 50%; transform: translateX(-50%);
+      font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 4px;
+      background: rgba(0,0,0,0.7);
+    }
+    #gazeCursorA .gcursor-tag { color: #00ff44; }
+    #gazeCursorB .gcursor-tag { color: #ff48d1; }
+
+    /* ------------------------- Calibration target ------------------------- */
+    #calTarget {
+      position: fixed; z-index: 6; left: 0; top: 0; width: 56px; height: 56px;
+      margin: -28px 0 0 -28px; border-radius: 50%; border: 4px solid #ffcc00;
+      background: radial-gradient(circle, #ffcc00 0 8px, transparent 9px);
+      box-shadow: 0 0 20px rgba(255,204,0,0.8); pointer-events: none; display: none;
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%,100%{transform:scale(1);} 50%{transform:scale(1.25);} }
+    #calTarget.sampling {
+      animation: shrink 0.9s linear forwards; border-color: #00ff44;
+      box-shadow: 0 0 20px rgba(0,255,68,0.8);
+    }
+    @keyframes shrink { from{transform:scale(1.25);} to{transform:scale(0.45);} }
+
+    /* Tap-point flash for Continuous mode: a brief ring at the click location
+       so the user can see "sample taken here" — the "markers in reverse"
+       affordance. JS sets left/top + restarts the animation per tap. */
+    #tapFlash {
+      position: fixed; z-index: 4; left: 0; top: 0; width: 44px; height: 44px;
+      margin: -22px 0 0 -22px; border-radius: 50%;
+      border: 3px solid #ffcc00; pointer-events: none; display: none;
+    }
+    #tapFlash.flash { display: block; animation: tapFlash 0.4s ease-out forwards; }
+    @keyframes tapFlash {
+      0%   { transform: scale(0.4); opacity: 1; border-color: #ffcc00; }
+      60%  { transform: scale(1.2); opacity: 0.9; border-color: #00ff88; }
+      100% { transform: scale(2.0); opacity: 0; border-color: #00ff88; }
+    }
+
+    /* ------------------------- Tile grid (Lab / Compare) ------------------------- */
+    #targets {
+      position: fixed; z-index: 3; inset: 0; display: none;
+      grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr 1fr;
+      gap: 3vmin; padding: 6vmin;
+      padding-top: max(6vmin, env(safe-area-inset-top));
+      padding-bottom: max(14vmin, env(safe-area-inset-bottom));
+      box-sizing: border-box; pointer-events: none;
+    }
+    #targets.visible { display: grid; }
+    .tile {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 1vmin; border-radius: 18px; border: 3px solid rgba(255,255,255,0.25);
+      background: rgba(0,0,0,0.35); color: #fff; font-size: 3.5vmin;
+    }
+    .tile .emoji { font-size: 8vmin; }
+    .tile.lookedA { border-color: #00ff44; box-shadow: 0 0 24px rgba(0,255,68,0.45); }
+    .tile.lookedB { border-color: #ff48d1; box-shadow: 0 0 24px rgba(255,72,209,0.45); }
+    .tile.lookedA.lookedB {
+      border-color: #ffe000; box-shadow: 0 0 28px rgba(255,224,0,0.6);
+    }
+
+    /* ------------------------- Status + start ------------------------- */
+    #status {
+      position: fixed; z-index: 7; left: 50%;
+      top: max(52px, calc(env(safe-area-inset-top) + 44px));
+      transform: translateX(-50%); max-width: 90vw; padding: 8px 16px;
+      border-radius: 999px; background: rgba(0,0,0,0.65); color: #fff;
+      font-size: 13px; text-align: center; transition: opacity 0.4s; pointer-events: none;
+    }
+    #status.error { background: rgba(180,30,30,0.85); }
+    #status.hidden { opacity: 0; }
+    #start {
+      position: fixed; z-index: 10; inset: 0; display: flex;
+      align-items: center; justify-content: center; background: #000;
+      color: #fff; border: 0; font-size: 20px; cursor: pointer;
+      flex-direction: column; gap: 12px;
+    }
+    #start .sub { font-size: 13px; color: #9aa; max-width: 80vw; text-align: center; }
+    #start.hidden { display: none; }
+    #start a { color: #00ff88; }
+  </style>
+</head>
+<body>
+  <video id="video" autoplay muted playsinline webkit-playsinline></video>
+  <canvas id="overlay"></canvas>
+
+  <!-- Top bar: back link, mode switcher, calibrate -->
+  <div id="topbar">
+    <a class="tb-link" href="index.html">← Main</a>
+    <div id="modes">
+      <button class="tb-btn active" data-mode="lab">Lab</button>
+      <button class="tb-btn" data-mode="viz">Visualizer</button>
+      <button class="tb-btn" data-mode="compare">Compare</button>
+      <button class="tb-btn" data-mode="continuous">Continuous</button>
+    </div>
+    <div class="spacer"></div>
+    <button id="calibrateBtn">🎯 Calibrate</button>
+  </div>
+
+  <div id="targets" aria-hidden="true"></div>
+  <div id="gazeCursorA" class="gcursor"><span class="gcursor-tag">A</span></div>
+  <div id="gazeCursorB" class="gcursor"><span class="gcursor-tag">B</span></div>
+  <div id="calTarget"></div>
+  <div id="status">Loading…</div>
+
+  <!-- Mode 1: Accuracy Lab -->
+  <div id="labPanel" class="panel visible">
+    <h3>Accuracy Lab</h3>
+    <div class="sub">Calibrate once, then toggle signals — each change refits instantly from the same samples and shows the new training error.</div>
+    <hr>
+    <label><input type="checkbox" data-cfg="iris"        checked> Iris offset (averaged)</label>
+    <label><input type="checkbox" data-cfg="blendshapes" checked> Blendshape gaze</label>
+    <label><input type="checkbox" data-cfg="headPoseZ"   checked> Head pose (z-proxies)</label>
+    <label><input type="checkbox" data-cfg="headPoseMatrix"> Head pose (matrix yaw/pitch)</label>
+    <label><input type="checkbox" data-cfg="irisSize"> Iris size (range proxy)</label>
+    <label><input type="checkbox" data-cfg="perEye"> Per-eye iris (not averaged)</label>
+    <hr>
+    <div id="labReadout" class="readout">Not calibrated yet.</div>
+  </div>
+
+  <!-- Mode 2: Signal Visualizer -->
+  <div id="vizPanel" class="panel">
+    <h3>Signals (live)</h3>
+    <div id="poseReadout" class="readout">—</div>
+    <hr>
+    <div class="sub">Blendshapes</div>
+    <div id="blendBars"></div>
+  </div>
+
+  <!-- Mode 3: Side-by-side Compare -->
+  <div id="comparePanel" class="panel">
+    <h3>Compare A vs B</h3>
+    <div class="sub"><span style="color:#00ff44">● A</span> = the frozen original algorithm (reference). <span style="color:#ff48d1">● B</span> = your experiment (toggle below).</div>
+    <hr>
+    <div style="color:#ff48d1; font-weight:600; margin:4px 0;">Model B signals</div>
+    <label><input type="checkbox" data-cfgb="iris"          checked> Iris offset</label>
+    <label><input type="checkbox" data-cfgb="blendshapes"   checked> Blendshape gaze</label>
+    <label><input type="checkbox" data-cfgb="headPoseZ"     checked> Head pose (z-proxies)</label>
+    <label><input type="checkbox" data-cfgb="headPoseMatrix" checked> Head pose (matrix)</label>
+    <label><input type="checkbox" data-cfgb="irisSize"> Iris size (range proxy)</label>
+    <label><input type="checkbox" data-cfgb="perEye"> Per-eye iris</label>
+    <hr>
+    <div id="compareReadout" class="readout">Calibrate to fit both models.</div>
+  </div>
+
+  <!-- Mode 4: Continuous calibration — "the markers, in reverse" -->
+  <div id="continuousPanel" class="panel">
+    <h3>Continuous Calibration</h3>
+    <div class="sub">Seed with the 9-point ritual once. Then <b>tap wherever you're actually looking</b> — each tap becomes a training sample and the model refits live. A flash marks where a sample was taken.</div>
+    <hr>
+    <div id="continuousReadout" class="readout">Not calibrated yet — run the 9-dot Calibrate first.</div>
+    <div class="row" style="margin-top:8px;">
+      <button id="clearContBtn" class="tb-btn" style="background:rgba(255,255,255,0.12);">↺ Clear continuous</button>
+    </div>
+  </div>
+
+  <!-- Tap-point flash: brief ring where a continuous sample was taken -->
+  <div id="tapFlash"></div>
+
+  <button id="start">
+    <div>👁️ Tap to start eye tracking</div>
+    <div class="sub">Playground mode — experiments only. <a href="index.html">Back to main prototype</a></div>
+  </button>
+
+  <script type="module">
+    import { FaceLandmarker, FilesetResolver } from
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+    // ---------------------------------------------------------------------
+    // Landmark indices — same as the main prototype. Iris ring points are
+    // used both for drawing and (new here) for the iris-size range signal.
+    // ---------------------------------------------------------------------
+    const RIGHT_IRIS_CENTER = 468, LEFT_IRIS_CENTER = 473;
+    const RIGHT_IRIS_RING = [469, 470, 471, 472];
+    const LEFT_IRIS_RING  = [474, 475, 476, 477];
+    const RIGHT_EYE = { iris: 468, c1: 33,  c2: 133, top: 159, bottom: 145 };
+    const LEFT_EYE  = { iris: 473, c1: 362, c2: 263, top: 386, bottom: 374 };
+    const NOSE_TIP = 1, CHEEK_R = 234, CHEEK_L = 454, FOREHEAD = 10, CHIN = 152;
+
+    const TILES = [
+      ["🎵","Music"],["📷","Camera"],
+      ["💬","Chat"], ["🗺️","Maps"],
+      ["✉️","Mail"], ["⚙️","Settings"]
+    ];
+
+    // 9-point calibration grid (normalized viewport coords), + sampling params.
+    const CAL_POINTS = [
+      [0.12,0.12],[0.50,0.12],[0.88,0.12],
+      [0.88,0.50],[0.50,0.50],[0.12,0.50],
+      [0.12,0.88],[0.50,0.88],[0.88,0.88]
+    ];
+    const SAMPLE_MS = 1000, SETTLE_MS = 250, MIN_SAMPLES = 8;
+    const BLINK_OPENNESS = 0.12;
+    // Continuous-mode tuning:
+    //   MAX_CONTINUOUS  — FIFO cap on living samples (keeps the model tracking
+    //     current posture; the 9-point seed in calSamples is never evicted).
+    //   SIGNAL_HISTORY  — rolling ring of recent signal frames averaged at tap
+    //     time to undo tap-timing lag (the eye saccades toward the finger by
+    //     the time it lands, so the tap-moment signal is too late — ~8 frames
+    //     ≈ 250ms captures the stable fixation before the saccade).
+    const MAX_CONTINUOUS = 60;
+    const SIGNAL_HISTORY = 8;
+
+    // DOM
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("overlay");
+    const ctx = canvas.getContext("2d");
+    const statusEl = document.getElementById("status");
+    const startBtn = document.getElementById("start");
+    const calBtn = document.getElementById("calibrateBtn");
+    const calTarget = document.getElementById("calTarget");
+    const cursorA = document.getElementById("gazeCursorA");
+    const cursorB = document.getElementById("gazeCursorB");
+    const targetsEl = document.getElementById("targets");
+    const tapFlash = document.getElementById("tapFlash");
+
+    // ---- State ----
+    let faceLandmarker = null;
+    let mode = "lab";          // lab | viz | compare | continuous | calibrating
+    let lastVideoTime = -1;
+    let latestSignal = null;   // most recent structured signal object
+    let latestCats = null;     // most recent blendshape categories (for viz bars)
+    let calSamples = [];       // [{ signal, target:[nx,ny] }, ...] — RAW signals kept
+    let continuousSamples = [];// living FIFO of { signal, target } — seed stays in calSamples
+    let signalHistory = [];    // rolling ring of recent signals (SIGNAL_HISTORY deep)
+    let sampleBuf = null;      // active collector during sampling
+    let tileEls = [];
+
+    // Configs. configA is the frozen original algorithm (reference in Compare).
+    // configB is the editable experiment. labConfig is Lab's freely-toggled set.
+    const configA = { iris:true, blendshapes:true, headPoseZ:true, headPoseMatrix:false, irisSize:false, perEye:false };
+    let configB  = { iris:true, blendshapes:true, headPoseZ:true, headPoseMatrix:true,  irisSize:false, perEye:false };
+    let labConfig = { ...configA };
+
+    let fitLab = null, fitA = null, fitB = null, fitCont = null;   // fitted mappings (or null)
+    let smoothLab = null, smoothA = null, smoothB = null, smoothCont = null;
+    let lookedA = null, lookedB = null;            // tile elements under each cursor
+    // Continuous mode reuses cursorA (green) + the "lookedA" tile class.
+
+    function setStatus(msg, isError=false) {
+      statusEl.textContent = msg;
+      statusEl.classList.toggle("error", isError);
+      statusEl.classList.remove("hidden");
+      if (isError) console.error("[PG]", msg); else console.log("[PG]", msg);
+    }
+    const delay = (ms) => new Promise(r => setTimeout(r, ms));
+
+    // ---------------------------------------------------------------------
+    // MEDIAPIPE SETUP — mirrors the main prototype, BUT turns the facial
+    // transformation matrix ON so we can derive real yaw/pitch/roll.
+    // ---------------------------------------------------------------------
+    async function createFaceLandmarker() {
+      setStatus("Loading MediaPipe Face Landmarker model…");
+      try {
+        const filesetResolver = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+        );
+        const options = {
+          baseOptions: {
+            modelAssetPath:
+              "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+            delegate: "GPU"
+          },
+          runningMode: "VIDEO",
+          numFaces: 1,
+          outputFaceBlendshapes: true,
+          // KEY DIFFERENCE FROM index.html: matrix ON → enables head-pose angles.
+          outputFacialTransformationMatrixes: true
+        };
+        try {
+          faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, options);
+        } catch (gpuErr) {
+          console.warn("[PG] GPU delegate failed, retrying CPU:", gpuErr);
+          options.baseOptions.delegate = "CPU";
+          faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, options);
+        }
+        setStatus("Model loaded ✔");
+      } catch (err) {
+        setStatus("Failed to load model. Check network/CDN access.", true);
+        console.error("[PG] Model init error:", err);
+        throw err;
+      }
+    }
+
+    // Camera setup — identical to the main prototype.
+    async function startCamera() {
+      if (!window.isSecureContext) {
+        setStatus("Camera requires HTTPS (or localhost).", true);
+        throw new Error("Insecure context.");
+      }
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setStatus("getUserMedia unsupported.", true);
+        throw new Error("getUserMedia unsupported.");
+      }
+      setStatus("Requesting camera permission…");
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: { facingMode: "user", width: { ideal: 1920 }, height: { ideal: 1080 } }
+        });
+      } catch (err) {
+        const hint = err.name === "NotAllowedError"
+          ? "Permission denied — allow camera and reload."
+          : err.name === "NotFoundError" ? "No front-facing camera found."
+          : `Camera error: ${err.name}`;
+        setStatus(hint, true);
+        throw err;
+      }
+      video.srcObject = stream;
+      await new Promise((resolve) => {
+        if (video.readyState >= HTMLMediaElement.HAVE_METADATA) resolve();
+        else video.addEventListener("loadedmetadata", resolve, { once: true });
+      });
+      try { await video.play(); } catch (e) { console.warn("[PG] video.play():", e); }
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      console.log(`[PG] Camera ready: ${video.videoWidth}x${video.videoHeight}`);
+    }
+
+    // ---------------------------------------------------------------------
+    // SIGNAL EXTRACTION
+    // Per-eye iris offset (as main prototype), iris size (NEW — ring radius
+    // normalized by eye width = a depth/range proxy), blendshape gaze, the
+    // original z-proxies, and yaw/pitch decomposed from the matrix (NEW).
+    // ---------------------------------------------------------------------
+    function eyeFeature(lm, eye) {
+      const c1 = lm[eye.c1], c2 = lm[eye.c2];
+      const w = Math.hypot(c1.x - c2.x, c1.y - c2.y);
+      if (w < 1e-6) return null;
+      const openness = Math.hypot(lm[eye.top].x - lm[eye.bottom].x,
+                                  lm[eye.top].y - lm[eye.bottom].y) / w;
+      if (openness < BLINK_OPENNESS) return null;
+      const cx = (c1.x + c2.x) / 2, cy = (c1.y + c2.y) / 2;
+      const iris = lm[eye.iris];
+      return [(iris.x - cx) / w, (iris.y - cy) / w];
+    }
+
+    // Mean ring radius / eye width. Bigger = closer to camera. Gives the
+    // regression a distance term so it can correct for near-vs-far geometry.
+    function irisSize(lm, eye, ring) {
+      const c1 = lm[eye.c1], c2 = lm[eye.c2];
+      const w = Math.hypot(c1.x - c2.x, c1.y - c2.y);
+      if (w < 1e-6) return null;
+      const center = lm[eye.iris];
+      let s = 0;
+      for (const i of ring) s += Math.hypot(lm[i].x - center.x, lm[i].y - center.y);
+      return (s / ring.length) / w;
+    }
+
+    let blendIdx = null;
+    function blendGaze(categories) {
+      if (!categories) return null;
+      if (!blendIdx) {
+        blendIdx = {};
+        categories.forEach((c, i) => { blendIdx[c.categoryName] = i; });
+      }
+      const v = (name) => categories[blendIdx[name]]?.score ?? 0;
+      return {
+        bx: (v("eyeLookOutLeft") + v("eyeLookInRight")) -
+            (v("eyeLookInLeft")  + v("eyeLookOutRight")),
+        by: (v("eyeLookUpLeft")  + v("eyeLookUpRight")) -
+            (v("eyeLookDownLeft") + v("eyeLookDownRight"))
+      };
+    }
+
+    // Decompose MediaPipe's 4x4 facial-transformation matrix (column-major
+    // flat16) into yaw/pitch/roll + translation. We strip scale by normalizing
+    // each column before extracting Euler angles. Exact sign convention is
+    // irrelevant for the regression (it learns it); values are also shown raw
+    // in the visualizer for human inspection.
+    function decomposeMatrix(m) {
+      const len = (a,b,c) => Math.hypot(a,b,c) || 1e-9;
+      const sx = len(m[0], m[1], m[2]);
+      const sy = len(m[4], m[5], m[6]);
+      const sz = len(m[8], m[9], m[10]);
+      const r00=m[0]/sx, r10=m[1]/sx, r20=m[2]/sx;
+      const r01=m[4]/sy, r11=m[5]/sy, r21=m[6]/sy;
+      const r02=m[8]/sz, r12=m[9]/sz, r22=m[10]/sz;
+      const pitch = Math.asin(Math.max(-1, Math.min(1, -r20)));
+      const yaw   = Math.atan2(r10, r00);
+      const roll  = Math.atan2(r21, r22);
+      return { yaw, pitch, roll, tx:m[12], ty:m[13], tz:m[14] };
+    }
+
+    // Build the structured signal object for one frame. Stored verbatim in
+    // calSamples so any config can be refit later without re-collecting data.
+    function extractSignals(landmarks, cats, matrix) {
+      const r = eyeFeature(landmarks, RIGHT_EYE);
+      const l = eyeFeature(landmarks, LEFT_EYE);
+      const avg = r && l ? [(r[0]+l[0])/2, (r[1]+l[1])/2] : (r || l);
+      const sizeR = irisSize(landmarks, RIGHT_EYE, RIGHT_IRIS_RING);
+      const sizeL = irisSize(landmarks, LEFT_EYE,  LEFT_IRIS_RING);
+      const b = blendGaze(cats) ?? { bx:0, by:0 };
+      const hx = landmarks[CHEEK_R].z - landmarks[CHEEK_L].z;
+      const hy = landmarks[FOREHEAD].z - landmarks[CHIN].z;
+      const nose = landmarks[NOSE_TIP];
+      let hp = null;
+      if (matrix?.data) {
+        try { hp = decomposeMatrix(matrix.data); } catch (e) { hp = null; }
+      }
+      return {
+        irisR:r, irisL:l, irisAvg:avg,
+        sizeR, sizeL,
+        blend:b,
+        headZ:[hx, hy],
+        headM: hp ? [hp.yaw, hp.pitch] : null,
+        headMFull: hp,
+        nose:[nose.x, nose.y]
+      };
+    }
+
+    // ---------------------------------------------------------------------
+    // FEATURE BUILDER — project a stored signal to a flat vector per config.
+    // Returns null if a required signal is missing (e.g. a blink frame when
+    // iris is enabled); callers drop those rows.
+    // ---------------------------------------------------------------------
+    function buildFeatureVector(s, cfg) {
+      if (!s) return null;
+      const f = [];
+      if (cfg.iris) {
+        if (cfg.perEye) {
+          if (!s.irisR || !s.irisL) return null;
+          f.push(s.irisR[0], s.irisR[1], s.irisL[0], s.irisL[1]);
+        } else {
+          if (!s.irisAvg) return null;
+          f.push(s.irisAvg[0], s.irisAvg[1]);
+        }
+      }
+      if (cfg.blendshapes) f.push(s.blend.bx, s.blend.by);
+      if (cfg.headPoseZ) f.push(s.headZ[0], s.headZ[1]);
+      if (cfg.headPoseMatrix) {
+        if (!s.headM) return null;
+        f.push(s.headM[0], s.headM[1]);
+      }
+      if (cfg.irisSize) {
+        if (s.sizeR == null || s.sizeL == null) return null;
+        f.push(s.sizeR, s.sizeL);
+      }
+      if (f.length === 0) return null;
+      return f;
+    }
+
+    // ---------------------------------------------------------------------
+    // REGRESSION — generalized from the main prototype. Operates on flat
+    // vectors of arbitrary length; same standardize → quadratic basis
+    // ([1, ...f, f0², f1²]) → ridge (Gauss-Jordan) approach.
+    // ---------------------------------------------------------------------
+    const basis = (f) => [1, ...f, f[0]*f[0], f[1]*f[1]];
+    const dot = (a,b) => a.reduce((s,v,i) => s + v*b[i], 0);
+
+    function solveLinear(A, b) {
+      const n = b.length;
+      const M = A.map((row,i) => [...row, b[i]]);
+      for (let col=0; col<n; col++) {
+        let piv = col;
+        for (let r=col+1; r<n; r++)
+          if (Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r;
+        [M[col], M[piv]] = [M[piv], M[col]];
+        if (Math.abs(M[col][col]) < 1e-12) throw new Error("Singular matrix");
+        for (let r=0; r<n; r++) {
+          if (r === col) continue;
+          const fac = M[r][col] / M[col][col];
+          for (let c=col; c<=n; c++) M[r][c] -= fac * M[col][c];
+        }
+      }
+      return M.map((row,i) => row[n] / row[i]);
+    }
+
+    // rows: [{ f:[...], t:[nx,ny] }]
+    function fitMapping(rows) {
+      const dim = rows[0].f.length;
+      const n = rows.length;
+      const mean = new Array(dim).fill(0);
+      for (const s of rows) for (let i=0;i<dim;i++) mean[i] += s.f[i]/n;
+      const std = new Array(dim).fill(0);
+      for (const s of rows) for (let i=0;i<dim;i++) std[i] += (s.f[i]-mean[i])**2/n;
+      for (let i=0;i<dim;i++) std[i] = Math.max(Math.sqrt(std[i]), 1e-6);
+      const norm = (f) => f.map((v,i) => (v-mean[i])/std[i]);
+      const X = rows.map(s => basis(norm(s.f)));
+      const k = X[0].length;
+      const lambda = 1e-3 * n;
+      const AtA = Array.from({length:k}, () => new Array(k).fill(0));
+      for (const row of X) for (let i=0;i<k;i++) for (let j=0;j<k;j++) AtA[i][j] += row[i]*row[j];
+      for (let i=1;i<k;i++) AtA[i][i] += lambda;
+      const fitAxis = (axis) => {
+        const Atb = new Array(k).fill(0);
+        rows.forEach((s,r) => { for (let i=0;i<k;i++) Atb[i] += X[r][i]*s.t[axis]; });
+        return solveLinear(AtA, Atb);
+      };
+      const coefX = fitAxis(0), coefY = fitAxis(1);
+      let se = 0;
+      rows.forEach((s,r) => {
+        se += (dot(X[r],coefX)-s.t[0])**2 + (dot(X[r],coefY)-s.t[1])**2;
+      });
+      return { mean, std, coefX, coefY, rms: Math.sqrt(se/n), n, dim };
+    }
+
+    // Project stored calibration samples through a config and fit.
+    // `samples` defaults to calSamples; Continuous mode passes seed+continuous.
+    function fitFromSamples(cfg, samples = calSamples) {
+      const rows = [];
+      for (const s of samples) {
+        const f = buildFeatureVector(s.signal, cfg);
+        if (f) rows.push({ f, t: s.target });
+      }
+      if (rows.length < Math.max(5, 2*(rows[0]?.f.length||1)))
+        throw new Error(`Too few usable samples (${rows.length})`);
+      return fitMapping(rows);
+    }
+
+    function predictGaze(fit, cfg, signal) {
+      if (!fit) return null;
+      const f = buildFeatureVector(signal, cfg);
+      if (!f) return null;
+      const b = basis(f.map((v,i) => (v - fit.mean[i]) / fit.std[i]));
+      const gx = dot(b, fit.coefX), gy = dot(b, fit.coefY);
+      if (!Number.isFinite(gx) || !Number.isFinite(gy)) return null;
+      return [Math.min(1,Math.max(0,gx)), Math.min(1,Math.max(0,gy))];
+    }
+
+    // Speed-adaptive smoothing (same idea as main prototype).
+    function smooth(smoothed, g) {
+      if (!smoothed) return [g[0], g[1]];
+      const a = Math.min(0.8, 0.12 + Math.hypot(g[0]-smoothed[0], g[1]-smoothed[1]) * 5);
+      return [smoothed[0] + (g[0]-smoothed[0])*a, smoothed[1] + (g[1]-smoothed[1])*a];
+    }
+
+    // Position a cursor + highlight the tile it lands on.
+    function updateCursor(smoothedRef, fit, cfg, signal, cursorEl, cls, lookedRef) {
+      const g = predictGaze(fit, cfg, signal);
+      if (!g) return { smoothed: smoothedRef, looked: lookedRef };
+      const sm = smooth(smoothedRef, g);
+      const px = sm[0]*window.innerWidth, py = sm[1]*window.innerHeight;
+      cursorEl.style.transform = `translate3d(${px}px,${py}px,0)`;
+      let hit = null;
+      for (const el of tileEls) {
+        const r = el.getBoundingClientRect();
+        if (px >= r.left && px <= r.right && py >= r.top && py <= r.bottom) { hit = el; break; }
+      }
+      if (hit !== lookedRef) {
+        lookedRef?.classList.remove(cls);
+        hit?.classList.add(cls);
+      }
+      return { smoothed: sm, looked: hit };
+    }
+
+    // ---------------------------------------------------------------------
+    // CONTINUOUS CALIBRATION — "the markers, in reverse".
+    // Each tap labels the recent signal buffer with the tap's viewport point,
+    // then the model refits over seed (calSamples) + living (continuousSamples).
+    // Drift you observe at a tap is consumed automatically: adding (signal, T)
+    // to the regression's objective pulls predictions at that signal toward T.
+    // ---------------------------------------------------------------------
+
+    // Average a buffer of signal objects element-wise. Skips null per-eye
+    // arrays if too few frames had them; nulls the field if none did. Used to
+    // undo tap-timing lag — a finger tap captures gaze ~150-250ms late, so we
+    // want the stable fixation before the saccade, not the tap-moment snapshot.
+    function averageSignals(buf) {
+      if (!buf.length) return null;
+      const out = { irisR:null, irisL:null, irisAvg:null, sizeR:null, sizeL:null,
+                    blend:{bx:0,by:0}, headZ:[0,0], headM:null, headMFull:null, nose:[0,0] };
+      let rN=0, lN=0, avgN=0, sR=0, sL=0, hN=0, mN=0, nzN=0;
+      for (const s of buf) {
+        if (s.irisR) { if (!out.irisR) out.irisR=[0,0]; out.irisR[0]+=s.irisR[0]; out.irisR[1]+=s.irisR[1]; rN++; }
+        if (s.irisL) { if (!out.irisL) out.irisL=[0,0]; out.irisL[0]+=s.irisL[0]; out.irisL[1]+=s.irisL[1]; lN++; }
+        if (s.irisAvg) { if (!out.irisAvg) out.irisAvg=[0,0]; out.irisAvg[0]+=s.irisAvg[0]; out.irisAvg[1]+=s.irisAvg[1]; avgN++; }
+        if (s.sizeR != null) { out.sizeR = (out.sizeR ?? 0) + s.sizeR; sR++; }
+        if (s.sizeL != null) { out.sizeL = (out.sizeL ?? 0) + s.sizeL; sL++; }
+        out.blend.bx += s.blend.bx; out.blend.by += s.blend.by;
+        out.headZ[0]+=s.headZ[0]; out.headZ[1]+=s.headZ[1]; hN++;
+        if (s.headM) { if (!out.headM) out.headM=[0,0]; out.headM[0]+=s.headM[0]; out.headM[1]+=s.headM[1]; mN++; }
+        if (s.nose) { out.nose[0]+=s.nose[0]; out.nose[1]+=s.nose[1]; nzN++; }
+      }
+      const n = buf.length;
+      if (out.irisR) { out.irisR[0]/=rN; out.irisR[1]/=rN; } else out.irisR = null;
+      if (out.irisL) { out.irisL[0]/=lN; out.irisL[1]/=lN; } else out.irisL = null;
+      if (out.irisAvg) { out.irisAvg[0]/=avgN; out.irisAvg[1]/=avgN; } else out.irisAvg = null;
+      out.sizeR = sR ? out.sizeR/sR : null;
+      out.sizeL = sL ? out.sizeL/sL : null;
+      out.blend.bx/=n; out.blend.by/=n;
+      out.headZ[0]/=hN; out.headZ[1]/=hN;
+      if (out.headM) { out.headM[0]/=mN; out.headM[1]/=mN; }
+      if (nzN) { out.nose[0]/=nzN; out.nose[1]/=nzN; } else out.nose = null;
+      return out;
+    }
+
+    // Combined training set for Continuous: seed (never evicted) + living FIFO.
+    function allContinuousSamples() { return calSamples.concat(continuousSamples); }
+
+    function fitContinuous() {
+      const samples = allContinuousSamples();
+      if (samples.length < Math.max(5, 6)) return null; // need the seed at least
+      try { return fitFromSamples(labConfig, samples); }
+      catch (err) { console.warn("[PG] continuous refit failed:", err.message); return null; }
+    }
+
+    function clearContinuous() {
+      continuousSamples = [];
+      smoothCont = null;
+      fitCont = calSamples.length ? fitFromSamples(labConfig) : null; // back to pure seed
+      lookedA?.classList.remove("lookedA");
+      lookedA = null;
+      updateContinuousReadout();
+      cursorA.style.display = fitCont ? "block" : "none";
+      setStatus(continuousSamples.length
+        ? "Continuous cleared — back to the 9-point baseline."
+        : "Continuous cleared.");
+    }
+
+    function updateContinuousReadout() {
+      const el = document.getElementById("continuousReadout");
+      const feats = activeFeatureCount(labConfig);
+      if (!calSamples.length) {
+        el.innerHTML = `<span class="dim">Not calibrated yet — run the 9-dot Calibrate first.</span>`;
+        return;
+      }
+      el.innerHTML =
+        `Seed         : ${calSamples.length} samples (fixed)\n` +
+        `Continuous   : ${continuousSamples.length} / ${MAX_CONTINUOUS} (FIFO)\n` +
+        `Features     : ${feats}\n` +
+        `RMS now      : ${rmsBadge(fitCont)}  over ${fitCont?.n ?? "?"} samples\n` +
+        `<span class="dim">Tap where you're actually looking.</span>`;
+    }
+
+    // Flash a ring at a tap location. Restarts the animation each call.
+    function flashAt(px, py) {
+      tapFlash.style.left = `${px}px`;
+      tapFlash.style.top  = `${py}px`;
+      tapFlash.classList.remove("flash");
+      void tapFlash.offsetWidth; // restart the CSS animation
+      tapFlash.classList.add("flash");
+    }
+
+    // Record one continuous sample from a tap: the averaged recent signal
+    // labeled with the tap's viewport-normalized point, then refit.
+    function recordContinuousSample(clientX, clientY) {
+      const nx = clientX / window.innerWidth;
+      const ny = clientY / window.innerHeight;
+      // Average the recent signal buffer (undo tap lag). If the buffer is
+      // empty (face lost), fall back to the very latest signal if present.
+      let sig = averageSignals(signalHistory);
+      if (!sig) sig = latestSignal;
+      if (!sig) { setStatus("No face signal at tap — try again."); return false; }
+      continuousSamples.push({ signal: sig, target: [nx, ny] });
+      while (continuousSamples.length > MAX_CONTINUOUS) continuousSamples.shift();
+      fitCont = fitContinuous();
+      smoothCont = null; // re-anchor smoothing to the new model
+      updateContinuousReadout();
+      flashAt(clientX, clientY);
+      return true;
+    }
+
+    // ---------------------------------------------------------------------
+    // CALIBRATION — same 9-point UX, but stores RAW signal objects so any
+    // config can be refit instantly afterwards (the Lab's core feature).
+    // ---------------------------------------------------------------------
+    function waitForTap() {
+      return new Promise((resolve) => {
+        setTimeout(() => document.addEventListener("pointerdown", resolve, { once: true }), 350);
+      });
+    }
+
+    async function runCalibration() {
+      const prevMode = (mode === "calibrating") ? "lab" : mode;
+      mode = "calibrating";
+      calBtn.style.display = "none";
+      document.querySelectorAll(".panel").forEach(p => p.classList.remove("visible"));
+      targetsEl.classList.remove("visible");
+      cursorA.style.display = "none";
+      cursorB.style.display = "none";
+      calSamples = [];
+      continuousSamples = [];   // a reseed wipes the living profile too
+      signalHistory = [];
+      smoothCont = null;
+      fitLab = fitA = fitB = fitCont = null;
+
+      let i = 0;
+      while (i < CAL_POINTS.length) {
+        const [nx, ny] = CAL_POINTS[i];
+        calTarget.style.display = "block";
+        calTarget.classList.remove("sampling");
+        calTarget.style.transform = "";
+        calTarget.style.left = `${nx*100}vw`;
+        calTarget.style.top  = `${ny*100}vh`;
+        setStatus(`Look at the yellow dot, then tap (${i+1}/${CAL_POINTS.length})`);
+        await waitForTap();
+
+        calTarget.classList.add("sampling");
+        await delay(SETTLE_MS);
+        sampleBuf = [];
+        await delay(SAMPLE_MS);
+        const buf = sampleBuf;
+        sampleBuf = null;
+
+        if (buf.length < MIN_SAMPLES) {
+          setStatus("Face lost during sampling — redoing that dot.");
+          await delay(1200);
+          continue;
+        }
+        for (const sig of buf) calSamples.push({ signal: sig, target: [nx, ny] });
+        i++;
+      }
+
+      calTarget.style.display = "none";
+      try {
+        fitLab = fitFromSamples(labConfig);
+        fitA   = fitFromSamples(configA);
+        fitB   = fitFromSamples(configB);
+        fitCont = fitLab;   // continuous starts identical to the Lab fit (pure seed)
+      } catch (err) {
+        console.error("[PG] Calibration fit failed:", err);
+        setStatus("Calibration failed — try again.", true);
+        calBtn.style.display = "";
+        enterMode(prevMode);
+        return;
+      }
+      console.log(`[PG] Calibrated: ${calSamples.length} samples. ` +
+        `Lab RMS ${(fitLab.rms*100).toFixed(1)}% | A RMS ${(fitA.rms*100).toFixed(1)}% | B RMS ${(fitB.rms*100).toFixed(1)}%`);
+      calBtn.style.display = "";
+      enterMode(prevMode);
+    }
+
+    // ---------------------------------------------------------------------
+    // MODE SWITCHING
+    // ---------------------------------------------------------------------
+    function enterMode(name) {
+      mode = name;
+      document.querySelectorAll("#modes .tb-btn").forEach(b =>
+        b.classList.toggle("active", b.dataset.mode === name));
+      document.querySelectorAll(".panel").forEach(p => p.classList.remove("visible"));
+      // reset tile highlights when leaving gaze modes
+      if (name !== "lab" && name !== "compare" && name !== "continuous") {
+        tileEls.forEach(el => el.classList.remove("lookedA","lookedB"));
+        targetsEl.classList.remove("visible");
+        cursorA.style.display = "none";
+        cursorB.style.display = "none";
+      }
+      if (name === "lab") {
+        document.getElementById("labPanel").classList.add("visible");
+        targetsEl.classList.add("visible");
+        cursorA.style.display = fitLab ? "block" : "none";
+        cursorB.style.display = "none";
+        tileEls.forEach(el => el.classList.remove("lookedB"));
+        updateLabReadout();
+        setStatus(fitLab ? "Lab: toggle signals to refit." : "Lab: calibrate first.");
+      } else if (name === "viz") {
+        document.getElementById("vizPanel").classList.add("visible");
+        setStatus("Visualizer: live signals. No calibration needed.");
+      } else if (name === "compare") {
+        document.getElementById("comparePanel").classList.add("visible");
+        targetsEl.classList.add("visible");
+        cursorA.style.display = fitA ? "block" : "none";
+        cursorB.style.display = fitB ? "block" : "none";
+        updateCompareReadout();
+        setStatus(fitA ? "Compare: A=green, B=magenta." : "Compare: calibrate first.");
+      } else if (name === "continuous") {
+        document.getElementById("continuousPanel").classList.add("visible");
+        targetsEl.classList.add("visible");
+        tileEls.forEach(el => el.classList.remove("lookedB"));
+        cursorB.style.display = "none";
+        cursorA.style.display = fitCont ? "block" : "none";
+        updateContinuousReadout();
+        setStatus(calSamples.length
+          ? "Continuous: tap where you're actually looking."
+          : "Continuous: run the 9-dot Calibrate first.");
+      }
+    }
+
+    function activeFeatureCount(cfg) {
+      // count features a config produces (for readouts)
+      let n = 0;
+      if (cfg.iris)         n += cfg.perEye ? 4 : 2;
+      if (cfg.blendshapes)  n += 2;
+      if (cfg.headPoseZ)    n += 2;
+      if (cfg.headPoseMatrix) n += 2;
+      if (cfg.irisSize)     n += 2;
+      return n;
+    }
+
+    function rmsBadge(fit) {
+      if (!fit) return '<span class="dim">—</span>';
+      const pct = (fit.rms*100).toFixed(1);
+      const cls = fit.rms < 0.06 ? "good" : (fit.rms < 0.10 ? "dim" : "bad");
+      return `<span class="${cls}">${pct}%</span>`;
+    }
+
+    function updateLabReadout() {
+      const el = document.getElementById("labReadout");
+      const feats = activeFeatureCount(labConfig);
+      if (!fitLab) { el.innerHTML = `Features: ${feats}\nNot calibrated yet.`; return; }
+      el.innerHTML =
+        `Features active : ${feats}\n` +
+        `Training RMS    : ${rmsBadge(fitLab)}  (n=${fitLab.n})\n` +
+        `Lower is better. Toggle a signal off —\n` +
+        `if RMS rises, that signal was helping.`;
+    }
+
+    function updateCompareReadout() {
+      const el = document.getElementById("compareReadout");
+      el.innerHTML =
+        `<span style="color:#00ff44">A</span> (frozen original) RMS : ${rmsBadge(fitA)}  [${activeFeatureCount(configA)} feat]\n` +
+        `<span style="color:#ff48d1">B</span> (your experiment)  RMS : ${rmsBadge(fitB)}  [${activeFeatureCount(configB)} feat]`;
+    }
+
+    // ---------------------------------------------------------------------
+    // VISUALIZER — blendshape bars + pose readout (matrix vs z-proxy).
+    // ---------------------------------------------------------------------
+    const BAR_NAMES = [
+      "eyeLookOutL","eyeLookOutR","eyeLookInL","eyeLookInR",
+      "eyeLookUpL","eyeLookUpR","eyeLookDownL","eyeLookDownR",
+      "eyeBlinkL","eyeBlinkR","eyeSquintL","eyeSquintR"
+    ];
+    const BAR_KEY = {
+      eyeLookOutL:"eyeLookOutLeft", eyeLookOutR:"eyeLookOutRight",
+      eyeLookInL:"eyeLookInLeft",   eyeLookInR:"eyeLookInRight",
+      eyeLookUpL:"eyeLookUpLeft",   eyeLookUpR:"eyeLookUpRight",
+      eyeLookDownL:"eyeLookDownLeft", eyeLookDownR:"eyeLookDownRight",
+      eyeBlinkL:"eyeBlinkLeft",     eyeBlinkR:"eyeBlinkRight",
+      eyeSquintL:"eyeSquintLeft",   eyeSquintR:"eyeSquintRight"
+    };
+    const barEls = {};
+    function buildBlendBars() {
+      const root = document.getElementById("blendBars");
+      root.innerHTML = "";
+      for (const short of BAR_NAMES) {
+        const row = document.createElement("div");
+        row.className = "bar-row";
+        row.innerHTML =
+          `<span>${short}</span>` +
+          `<span class="bar-track"><span class="bar-fill"></span></span>` +
+          `<span class="bar-val">0.00</span>`;
+        root.appendChild(row);
+        barEls[short] = { fill: row.querySelector(".bar-fill"), val: row.querySelector(".bar-val") };
+      }
+    }
+    function updateViz(cats, signal) {
+      if (cats) {
+        const idx = {};
+        cats.forEach((c,i) => { idx[c.categoryName] = i; });
+        for (const short of BAR_NAMES) {
+          const v = cats[idx[BAR_KEY[short]]]?.score ?? 0;
+          const e = barEls[short];
+          e.fill.style.width = `${Math.min(100, v*100)}%`;
+          e.val.textContent = v.toFixed(2);
+        }
+      }
+      const pr = document.getElementById("poseReadout");
+      const hp = signal?.headMFull;
+      const hz = signal?.headZ;
+      const deg = (x) => x==null ? "—" : (x*180/Math.PI).toFixed(1).padStart(6) + "°";
+      pr.innerHTML =
+        `head-pose MATRIX  yaw ${deg(hp?.yaw)}  pitch ${deg(hp?.pitch)}  roll ${deg(hp?.roll)}\n` +
+        `head-pose z-proxy  hx ${(hz?.[0]??0).toFixed(3)}  hy ${(hz?.[1]??0).toFixed(3)}\n` +
+        `nose (${signal?.nose?.[0].toFixed(3) ?? "?"}, ${signal?.nose?.[1].toFixed(3) ?? "?"})`;
+    }
+
+    // ---------------------------------------------------------------------
+    // RENDER LOOP
+    // ---------------------------------------------------------------------
+    function drawIris(landmarks) {
+      const drawOne = (centerIdx, ring) => {
+        const c = landmarks[centerIdx];
+        const x = c.x*canvas.width, y = c.y*canvas.height;
+        let radius = 4;
+        if (ring.length) {
+          let sum = 0;
+          for (const i of ring) {
+            const dx = (landmarks[i].x - c.x)*canvas.width;
+            const dy = (landmarks[i].y - c.y)*canvas.height;
+            sum += Math.hypot(dx, dy);
+          }
+          radius = Math.max(3, sum/ring.length);
+        }
+        // ring outline (visualizer detail; cheap, always on)
+        ctx.beginPath();
+        for (let i=0;i<ring.length;i++) {
+          const p = landmarks[ring[i]];
+          const px = p.x*canvas.width, py = p.y*canvas.height;
+          if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+        }
+        ctx.closePath();
+        ctx.strokeStyle = "rgba(0,255,68,0.5)"; ctx.lineWidth = 1.5; ctx.stroke();
+        // center marker
+        ctx.beginPath(); ctx.arc(x,y,radius,0,Math.PI*2);
+        ctx.strokeStyle = "#00FF44"; ctx.lineWidth = 3; ctx.stroke();
+        ctx.beginPath(); ctx.arc(x,y,3,0,Math.PI*2);
+        ctx.fillStyle = "#00FF44"; ctx.strokeStyle = "rgba(0,0,0,0.8)"; ctx.lineWidth = 1.5;
+        ctx.fill(); ctx.stroke();
+      };
+      drawOne(RIGHT_IRIS_CENTER, RIGHT_IRIS_RING);
+      drawOne(LEFT_IRIS_CENTER,  LEFT_IRIS_RING);
+    }
+
+    function renderLoop() {
+      if (video.currentTime !== lastVideoTime && video.videoWidth > 0) {
+        lastVideoTime = video.currentTime;
+        let result = null;
+        try {
+          result = faceLandmarker.detectForVideo(video, performance.now());
+        } catch (err) {
+          console.error("[PG] detectForVideo failed:", err);
+        }
+        ctx.clearRect(0,0,canvas.width,canvas.height);
+
+        if (result?.faceLandmarks?.length) {
+          const lm = result.faceLandmarks[0];
+          const cats = result.faceBlendshapes?.[0]?.categories;
+          const matrix = result.facialTransformationMatrixes?.[0];
+          latestCats = cats;
+          drawIris(lm);
+
+          const sig = extractSignals(lm, cats, matrix);
+          latestSignal = sig;
+          if (sampleBuf) sampleBuf.push(sig);
+          // Always keep a short rolling history so a tap anywhere can grab the
+          // averaged recent fixation (used by Continuous mode).
+          signalHistory.push(sig);
+          while (signalHistory.length > SIGNAL_HISTORY) signalHistory.shift();
+
+          if (mode === "viz") updateViz(cats, sig);
+          else if (mode === "lab" && fitLab) {
+            const r = updateCursor(smoothLab, fitLab, labConfig, sig, cursorA, "lookedA", lookedA);
+            smoothLab = r.smoothed; lookedA = r.looked;
+          } else if (mode === "continuous" && fitCont) {
+            const r = updateCursor(smoothCont, fitCont, labConfig, sig, cursorA, "lookedA", lookedA);
+            smoothCont = r.smoothed; lookedA = r.looked;
+          } else if (mode === "compare" && (fitA || fitB)) {
+            if (fitA) {
+              const r = updateCursor(smoothA, fitA, configA, sig, cursorA, "lookedA", lookedA);
+              smoothA = r.smoothed; lookedA = r.looked;
+            }
+            if (fitB) {
+              const r = updateCursor(smoothB, fitB, configB, sig, cursorB, "lookedB", lookedB);
+              smoothB = r.smoothed; lookedB = r.looked;
+            }
+            // live agreement distance
+            if (smoothA && smoothB) {
+              const d = Math.hypot(smoothA[0]-smoothB[0], smoothA[1]-smoothB[1]);
+              const el = document.getElementById("compareReadout");
+              const agreeCls = d < 0.04 ? "good" : (d < 0.10 ? "dim" : "bad");
+              el.innerHTML =
+                `<span style="color:#00ff44">A</span> RMS : ${rmsBadge(fitA)}  [${activeFeatureCount(configA)} feat]\n` +
+                `<span style="color:#ff48d1">B</span> RMS : ${rmsBadge(fitB)}  [${activeFeatureCount(configB)} feat]\n` +
+                `A↔B gap : <span class="${agreeCls}">${(d*100).toFixed(1)}%</span> of screen`;
+            }
+          }
+        }
+      }
+      if ("requestVideoFrameCallback" in HTMLVideoElement.prototype)
+        video.requestVideoFrameCallback(renderLoop);
+      else requestAnimationFrame(renderLoop);
+    }
+
+    // ---------------------------------------------------------------------
+    // TILES + BOOT
+    // ---------------------------------------------------------------------
+    function buildTiles() {
+      targetsEl.innerHTML = "";
+      tileEls = TILES.map(([emoji,label]) => {
+        const el = document.createElement("div");
+        el.className = "tile";
+        el.innerHTML = `<span class="emoji">${emoji}</span><span>${label}</span>`;
+        targetsEl.appendChild(el);
+        return el;
+      });
+    }
+
+    startBtn.addEventListener("click", async () => {
+      startBtn.classList.add("hidden");
+      try {
+        await createFaceLandmarker();
+        await startCamera();
+        buildTiles();
+        buildBlendBars();
+        renderLoop();
+        enterMode("lab");
+      } catch (err) {
+        startBtn.classList.remove("hidden");
+        startBtn.querySelector("div").textContent = "⟳ Retry";
+      }
+    }, { passive: true });
+
+    // Mode buttons
+    document.querySelectorAll("#modes .tb-btn").forEach(b => {
+      b.addEventListener("click", () => enterMode(b.dataset.mode));
+    });
+
+    // Calibrate button (top bar) — available in any mode
+    calBtn.addEventListener("click", (e) => { e.stopPropagation(); runCalibration(); });
+
+    // Lab checkboxes → update labConfig + refit
+    document.querySelectorAll('#labPanel input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener("change", () => {
+        labConfig[cb.dataset.cfg] = cb.checked;
+        if (calSamples.length) {
+          try { fitLab = fitFromSamples(labConfig); }
+          catch (err) { console.warn("[PG] refit failed:", err.message); fitLab = null; }
+        }
+        updateLabReadout();
+        cursorA.style.display = fitLab ? "block" : "none";
+      });
+    });
+
+    // Compare checkboxes → update configB + refit
+    document.querySelectorAll('#comparePanel input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener("change", () => {
+        configB[cb.dataset.cfgb] = cb.checked;
+        if (calSamples.length) {
+          try { fitB = fitFromSamples(configB); }
+          catch (err) { console.warn("[PG] refit B failed:", err.message); fitB = null; }
+        }
+        updateCompareReadout();
+        cursorB.style.display = fitB ? "block" : "none";
+      });
+    });
+
+    // Lab checkboxes also affect Continuous (it reuses labConfig), so refit
+    // fitCont from seed+continuous whenever the signal set changes.
+    document.querySelectorAll('#labPanel input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener("change", () => {
+        if (calSamples.length) {
+          try { fitCont = fitContinuous(); }
+          catch (err) { console.warn("[PG] continuous refit failed:", err.message); fitCont = null; }
+          updateContinuousReadout();
+          if (mode === "continuous") cursorA.style.display = fitCont ? "block" : "none";
+        }
+      });
+    });
+
+    // Continuous: a tap anywhere records a sample. Ignore taps on UI chrome
+    // (buttons, links, the panels themselves) so interacting with controls
+    // doesn't get logged as gaze labels. Also ignore while calibrating.
+    document.addEventListener("pointerdown", (e) => {
+      if (mode !== "continuous") return;
+      if (e.target.closest("button, a, .panel, #topbar, #calTarget, #tapFlash")) return;
+      if (!calSamples.length) { setStatus("Run the 9-dot Calibrate first.", true); return; }
+      const ok = recordContinuousSample(e.clientX, e.clientY);
+      if (ok) {
+        console.log(`[PG] Continuous sample @ (${(e.clientX/window.innerWidth).toFixed(3)},` +
+          `${(e.clientY/window.innerHeight).toFixed(3)}) — ${continuousSamples.length}/${MAX_CONTINUOUS}, ` +
+          `RMS ${(fitCont?.rms*100 ?? 0).toFixed(1)}%`);
+      }
+    });
+
+    // Clear-continuous button: drop the living samples, keep the seed.
+    document.getElementById("clearContBtn").addEventListener("click", (e) => {
+      e.stopPropagation();
+      clearContinuous();
+    });
+  </script>
+</body>
+</html>
