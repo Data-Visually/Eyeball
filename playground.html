@@ -294,8 +294,9 @@
     // regression head-pose invariance (it sees the answer stay put while head
     // pose varies, so it learns to subtract head motion out). A dot advances
     // once yaw + pitch coverage is met (or a max time elapses).
-    const SWEEP_YAW = 0.50, SWEEP_PITCH = 0.32;   // radians of span to cover
+    const SWEEP_FX = 0.45, SWEEP_FY = 0.30;   // facing-direction span to cover
     const SWEEP_MIN_MS = 2200, SWEEP_MAX_MS = 9000, SWEEP_MIN_SAMPLES = 30;
+    const SWEEP_PER_DOT = 40;  // cap kept samples/dot so continuous can still shift the fit
     // Continuous-mode tuning:
     //   MAX_CONTINUOUS  — FIFO cap on living samples (keeps the model tracking
     //     current posture; the 9-point seed in calSamples is never evicted).
@@ -501,17 +502,24 @@
       const hx = landmarks[CHEEK_R].z - landmarks[CHEEK_L].z;
       const hy = landmarks[FOREHEAD].z - landmarks[CHIN].z;
       const nose = landmarks[NOSE_TIP];
-      let hp = null;
+      let hp = null, face = null;
       if (matrix?.data) {
-        try { hp = decomposeMatrix(matrix.data); } catch (e) { hp = null; }
+        const m = matrix.data;
+        try { hp = decomposeMatrix(m); } catch (e) { hp = null; }
+        // Head FACING direction = normalized 3rd column of the rotation. fx
+        // captures turning (yaw), fy captures nodding (pitch) — both cleanly,
+        // unlike the Euler decomposition which mislabels/drops an axis. This is
+        // the head-pose FEATURE the regression uses.
+        const n = Math.hypot(m[8], m[9], m[10]) || 1e-9;
+        face = [m[8] / n, m[9] / n];
       }
       return {
         irisR:r, irisL:l, irisAvg:avg,
         sizeR, sizeL,
         blend:b,
         headZ:[hx, hy],
-        headM: hp ? [hp.yaw, hp.pitch] : null,
-        headMFull: hp,
+        headM: face,                                  // [fx, fy] facing direction
+        headMFull: hp ? { ...hp, fx: face?.[0], fy: face?.[1] } : null,
         nose:[nose.x, nose.y]
       };
     }
@@ -780,16 +788,16 @@
           return "▓".repeat(n) + "░".repeat(8 - n);
         };
         const step = () => {
-          const hp = latestSignal?.headMFull;
-          if (hp) {
-            yMin = Math.min(yMin, hp.yaw); yMax = Math.max(yMax, hp.yaw);
-            pMin = Math.min(pMin, hp.pitch); pMax = Math.max(pMax, hp.pitch);
+          const hm = latestSignal?.headM; // [fx, fy] facing direction
+          if (hm) {
+            yMin = Math.min(yMin, hm[0]); yMax = Math.max(yMax, hm[0]);
+            pMin = Math.min(pMin, hm[1]); pMax = Math.max(pMax, hm[1]);
           }
           const yawSpan = yMax > -Infinity ? yMax - yMin : 0;
           const pitchSpan = pMax > -Infinity ? pMax - pMin : 0;
-          const covY = yawSpan / SWEEP_YAW, covP = pitchSpan / SWEEP_PITCH;
+          const covY = yawSpan / SWEEP_FX, covP = pitchSpan / SWEEP_FY;
           setStatus(`Dot ${dotIndex + 1}/${CAL_POINTS.length} — eyes locked, rotate head\n` +
-            `yaw ${bar(covY)}  pitch ${bar(covP)}`);
+            `turn ${bar(covY)}  nod ${bar(covP)}`);
           const elapsed = performance.now() - t0;
           const enough = covY >= 1 && covP >= 1 && sampleBuf && sampleBuf.length >= SWEEP_MIN_SAMPLES;
           if ((enough && elapsed >= SWEEP_MIN_MS) || elapsed >= SWEEP_MAX_MS) resolve();
@@ -839,7 +847,15 @@
           await delay(1200);
           continue;
         }
-        for (const sig of buf) calSamples.push({ signal: sig, target: [nx, ny] });
+        let kept = buf;
+        if (headSweep && buf.length > SWEEP_PER_DOT) {
+          // Even-stride downsample so a long sweep doesn't flood the seed —
+          // keeps the head-pose spread but a sane sample count.
+          kept = [];
+          const stride = buf.length / SWEEP_PER_DOT;
+          for (let k = 0; k < SWEEP_PER_DOT; k++) kept.push(buf[Math.floor(k * stride)]);
+        }
+        for (const sig of kept) calSamples.push({ signal: sig, target: [nx, ny] });
         i++;
       }
 
@@ -988,10 +1004,13 @@
       }
       const pr = document.getElementById("poseReadout");
       const hp = signal?.headMFull;
+      const hm = signal?.headM;
       const hz = signal?.headZ;
       const deg = (x) => x==null ? "—" : (x*180/Math.PI).toFixed(1).padStart(6) + "°";
+      const f = (x) => (x==null?0:x).toFixed(3).padStart(7);
       pr.innerHTML =
-        `head-pose MATRIX  yaw ${deg(hp?.yaw)}  pitch ${deg(hp?.pitch)}  roll ${deg(hp?.roll)}\n` +
+        `head FACING (feature)  turn ${f(hm?.[0])}  nod ${f(hm?.[1])}\n` +
+        `euler (raw)  yaw ${deg(hp?.yaw)}  pitch ${deg(hp?.pitch)}  roll ${deg(hp?.roll)}\n` +
         `head-pose z-proxy  hx ${(hz?.[0]??0).toFixed(3)}  hy ${(hz?.[1]??0).toFixed(3)}\n` +
         `nose (${signal?.nose?.[0].toFixed(3) ?? "?"}, ${signal?.nose?.[1].toFixed(3) ?? "?"})`;
     }
