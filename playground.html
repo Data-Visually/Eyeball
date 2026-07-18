@@ -1080,14 +1080,22 @@
     }
 
     // Live "turn / nod" bars burned onto the canvas so movement registers even
-    // if you're looking at the video, not the side panel.
+    // if you're looking at the video, not the side panel. The bars read
+    // *deviation from your resting pose* (a slow EMA baseline): a laptop camera
+    // sits above eye-line, so the raw nod signal has a baseline offset that
+    // otherwise eats the whole "look down" half of the range.
+    let meterBase = null;
     function drawHeadMeters(signal) {
       const hm = signal?.headM; if (!hm) return;
-      const clamp = (v) => Math.max(-1, Math.min(1, v / 0.5));
+      if (!meterBase) meterBase = [hm[0], hm[1]];
+      else { meterBase[0] += (hm[0]-meterBase[0])*0.01; meterBase[1] += (hm[1]-meterBase[1])*0.01; }
+      const turn = hm[0] - meterBase[0], nod = hm[1] - meterBase[1];
       const bx = 30, by = canvas.height - 90, W = 260, H = 20;
-      const meter = (y, label, val) => {
+      // per-axis full-scale: nod range is smaller than turn, so it saturates sooner.
+      const meter = (y, label, val, div) => {
+        const f = Math.max(-1, Math.min(1, val / div));
         ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(bx, y, W, H);
-        const c = W / 2 + clamp(val) * (W / 2);
+        const c = W / 2 + f * (W / 2);
         ctx.fillStyle = "#00e5a0"; ctx.fillRect(bx + W / 2, y, c - W / 2, H);
         ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif"; ctx.textAlign = "left";
         ctx.fillText(label, bx + 6, y + 15);
@@ -1096,8 +1104,8 @@
       };
       // These are drawn in the mirrored canvas; flip text back so it's readable.
       ctx.save(); ctx.setTransform(-1, 0, 0, 1, canvas.width, 0);
-      meter(by, "TURN", hm[0]);
-      meter(by + 28, "NOD", hm[1]);
+      meter(by, "TURN", turn, 0.5);
+      meter(by + 28, "NOD", nod, 0.32);
       ctx.restore();
     }
 
