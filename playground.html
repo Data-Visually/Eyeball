@@ -261,7 +261,7 @@
   </button>
 
   <script type="module">
-    import { FaceLandmarker, FilesetResolver } from
+    import { FaceLandmarker, FilesetResolver, DrawingUtils } from
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
     // ---------------------------------------------------------------------
@@ -311,6 +311,7 @@
     const video = document.getElementById("video");
     const canvas = document.getElementById("overlay");
     const ctx = canvas.getContext("2d");
+    const drawingUtils = new DrawingUtils(ctx);
     const statusEl = document.getElementById("status");
     const startBtn = document.getElementById("start");
     const calBtn = document.getElementById("calibrateBtn");
@@ -1052,6 +1053,47 @@
       drawOne(LEFT_IRIS_CENTER,  LEFT_IRIS_RING);
     }
 
+    // Head-pose gizmo: a 3D axis cross anchored at the nose, oriented by the
+    // rotation matrix. The blue Z-axis is where the nose points — it visibly
+    // swings as you turn/nod, so head tracking is obvious at a glance.
+    function drawHeadAxes(lm, matrix) {
+      if (!matrix?.data) return;
+      const m = matrix.data;
+      const ox = lm[NOSE_TIP].x * canvas.width, oy = lm[NOSE_TIP].y * canvas.height;
+      const L = canvas.width * 0.14;
+      const axis = (ax, ay, col, w) => {
+        ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(ox + ax * L, oy + ay * L);
+        ctx.strokeStyle = col; ctx.lineWidth = w; ctx.lineCap = "round"; ctx.stroke();
+      };
+      axis(m[0], m[1], "#ff5555", 4);   // X (side-to-side) red
+      axis(m[4], m[5], "#55ff55", 4);   // Y (up axis, image-y down) green
+      axis(m[8], m[9], "#5599ff", 6);   // Z (nose direction) blue — the pointer
+      ctx.beginPath(); ctx.arc(ox, oy, 5, 0, Math.PI * 2);
+      ctx.fillStyle = "#fff"; ctx.fill();
+    }
+
+    // Live "turn / nod" bars burned onto the canvas so movement registers even
+    // if you're looking at the video, not the side panel.
+    function drawHeadMeters(signal) {
+      const hm = signal?.headM; if (!hm) return;
+      const clamp = (v) => Math.max(-1, Math.min(1, v / 0.5));
+      const bx = 30, by = canvas.height - 90, W = 260, H = 20;
+      const meter = (y, label, val) => {
+        ctx.fillStyle = "rgba(0,0,0,0.5)"; ctx.fillRect(bx, y, W, H);
+        const c = W / 2 + clamp(val) * (W / 2);
+        ctx.fillStyle = "#00e5a0"; ctx.fillRect(bx + W / 2, y, c - W / 2, H);
+        ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif"; ctx.textAlign = "left";
+        ctx.fillText(label, bx + 6, y + 15);
+        ctx.beginPath(); ctx.moveTo(bx + W / 2, y); ctx.lineTo(bx + W / 2, y + H);
+        ctx.strokeStyle = "rgba(255,255,255,0.5)"; ctx.lineWidth = 1; ctx.stroke();
+      };
+      // These are drawn in the mirrored canvas; flip text back so it's readable.
+      ctx.save(); ctx.setTransform(-1, 0, 0, 1, canvas.width, 0);
+      meter(by, "TURN", hm[0]);
+      meter(by + 28, "NOD", hm[1]);
+      ctx.restore();
+    }
+
     function renderLoop() {
       if (video.currentTime !== lastVideoTime && video.videoWidth > 0) {
         lastVideoTime = video.currentTime;
@@ -1068,10 +1110,25 @@
           const cats = result.faceBlendshapes?.[0]?.categories;
           const matrix = result.facialTransformationMatrixes?.[0];
           latestCats = cats;
-          drawIris(lm);
 
           const sig = extractSignals(lm, cats, matrix);
           latestSignal = sig;
+
+          // Visualizer: full face wiremesh + pose gizmo + on-canvas meters so
+          // head/face movement is registered visually, not just in the panel.
+          if (mode === "viz") {
+            drawingUtils.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_TESSELATION,
+              { color: "rgba(0,255,140,0.16)", lineWidth: 0.5 });
+            drawingUtils.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_FACE_OVAL,
+              { color: "rgba(0,229,255,0.7)", lineWidth: 2 });
+            drawingUtils.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_LEFT_EYE,
+              { color: "#66aaff", lineWidth: 1.5 });
+            drawingUtils.drawConnectors(lm, FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE,
+              { color: "#66aaff", lineWidth: 1.5 });
+            drawHeadAxes(lm, matrix);
+            drawHeadMeters(sig);
+          }
+          drawIris(lm);
           if (sampleBuf) sampleBuf.push(sig);
           // Always keep a short rolling history so a tap anywhere can grab the
           // averaged recent fixation (used by Continuous mode).
