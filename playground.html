@@ -191,6 +191,7 @@
       <button class="tb-btn" data-mode="continuous">Continuous</button>
     </div>
     <div class="spacer"></div>
+    <button id="sweepBtn" class="tb-btn">🔄 Head-sweep: off</button>
     <button id="calibrateBtn">🎯 Calibrate</button>
   </div>
 
@@ -288,6 +289,13 @@
     ];
     const SAMPLE_MS = 1000, SETTLE_MS = 250, MIN_SAMPLES = 8;
     const BLINK_OPENNESS = 0.12;
+    // Head-sweep calibration: hold your eyes on the dot and ROTATE YOUR HEAD to
+    // span a range of head poses for one fixed gaze target. This teaches the
+    // regression head-pose invariance (it sees the answer stay put while head
+    // pose varies, so it learns to subtract head motion out). A dot advances
+    // once yaw + pitch coverage is met (or a max time elapses).
+    const SWEEP_YAW = 0.50, SWEEP_PITCH = 0.32;   // radians of span to cover
+    const SWEEP_MIN_MS = 2200, SWEEP_MAX_MS = 9000, SWEEP_MIN_SAMPLES = 30;
     // Continuous-mode tuning:
     //   MAX_CONTINUOUS  — FIFO cap on living samples (keeps the model tracking
     //     current posture; the 9-point seed in calSamples is never evicted).
@@ -314,6 +322,7 @@
     // ---- State ----
     let faceLandmarker = null;
     let mode = "lab";          // lab | viz | compare | continuous | calibrating
+    let headSweep = false;     // head-rotation sweep during calibration
     let lastVideoTime = -1;
     let latestSignal = null;   // most recent structured signal object
     let latestCats = null;     // most recent blendshape categories (for viz bars)
@@ -759,6 +768,37 @@
       });
     }
 
+    // Collect samples at one dot while the user rotates their head, until
+    // yaw + pitch coverage is met (or max time). sampleBuf is filled by the
+    // render loop; here we just watch head-pose span and update the coverage UI.
+    function collectSweep(dotIndex) {
+      return new Promise((resolve) => {
+        const t0 = performance.now();
+        let yMin = Infinity, yMax = -Infinity, pMin = Infinity, pMax = -Infinity;
+        const bar = (frac) => {
+          const n = Math.max(0, Math.min(8, Math.round(frac * 8)));
+          return "▓".repeat(n) + "░".repeat(8 - n);
+        };
+        const step = () => {
+          const hp = latestSignal?.headMFull;
+          if (hp) {
+            yMin = Math.min(yMin, hp.yaw); yMax = Math.max(yMax, hp.yaw);
+            pMin = Math.min(pMin, hp.pitch); pMax = Math.max(pMax, hp.pitch);
+          }
+          const yawSpan = yMax > -Infinity ? yMax - yMin : 0;
+          const pitchSpan = pMax > -Infinity ? pMax - pMin : 0;
+          const covY = yawSpan / SWEEP_YAW, covP = pitchSpan / SWEEP_PITCH;
+          setStatus(`Dot ${dotIndex + 1}/${CAL_POINTS.length} — eyes locked, rotate head\n` +
+            `yaw ${bar(covY)}  pitch ${bar(covP)}`);
+          const elapsed = performance.now() - t0;
+          const enough = covY >= 1 && covP >= 1 && sampleBuf && sampleBuf.length >= SWEEP_MIN_SAMPLES;
+          if ((enough && elapsed >= SWEEP_MIN_MS) || elapsed >= SWEEP_MAX_MS) resolve();
+          else requestAnimationFrame(step);
+        };
+        requestAnimationFrame(step);
+      });
+    }
+
     async function runCalibration() {
       const prevMode = (mode === "calibrating") ? "lab" : mode;
       mode = "calibrating";
@@ -781,18 +821,21 @@
         calTarget.style.transform = "";
         calTarget.style.left = `${nx*100}vw`;
         calTarget.style.top  = `${ny*100}vh`;
-        setStatus(`Look at the yellow dot, then tap (${i+1}/${CAL_POINTS.length})`);
+        setStatus(headSweep
+          ? `Dot ${i+1}/${CAL_POINTS.length} — eyes on the dot, tap, then ROTATE your head`
+          : `Look at the yellow dot, then tap (${i+1}/${CAL_POINTS.length})`);
         await waitForTap();
 
         calTarget.classList.add("sampling");
         await delay(SETTLE_MS);
         sampleBuf = [];
-        await delay(SAMPLE_MS);
+        if (headSweep) await collectSweep(i);
+        else await delay(SAMPLE_MS);
         const buf = sampleBuf;
         sampleBuf = null;
 
-        if (buf.length < MIN_SAMPLES) {
-          setStatus("Face lost during sampling — redoing that dot.");
+        if (buf.length < (headSweep ? SWEEP_MIN_SAMPLES : MIN_SAMPLES)) {
+          setStatus("Not enough samples — redoing that dot.");
           await delay(1200);
           continue;
         }
@@ -1086,6 +1129,30 @@
 
     // Calibrate button (top bar) — available in any mode
     calBtn.addEventListener("click", (e) => { e.stopPropagation(); runCalibration(); });
+
+    // Head-sweep toggle. When on, calibration collects a head-pose sweep per
+    // dot. It only helps if the model uses head pose, so switching it on nudges
+    // the matrix yaw/pitch signal on in the Lab config (and refits if calibrated).
+    const sweepBtn = document.getElementById("sweepBtn");
+    sweepBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      headSweep = !headSweep;
+      sweepBtn.textContent = `🔄 Head-sweep: ${headSweep ? "on" : "off"}`;
+      sweepBtn.classList.toggle("active", headSweep);
+      if (headSweep && !labConfig.headPoseMatrix) {
+        labConfig.headPoseMatrix = true;
+        const cb = document.querySelector('#labPanel input[data-cfg="headPoseMatrix"]');
+        if (cb) cb.checked = true;
+        if (calSamples.length) {
+          try { fitLab = fitFromSamples(labConfig); } catch (err) { fitLab = null; }
+          try { fitCont = fitContinuous(); } catch (err) { fitCont = null; }
+          updateLabReadout();
+        }
+      }
+      setStatus(headSweep
+        ? "Head-sweep ON — recalibrate: keep eyes on each dot and rotate your head."
+        : "Head-sweep off — standard still calibration.");
+    });
 
     // Lab checkboxes → update labConfig + refit
     document.querySelectorAll('#labPanel input[type="checkbox"]').forEach(cb => {
