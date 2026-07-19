@@ -156,6 +156,18 @@
       border-color: #ffe000; box-shadow: 0 0 28px rgba(255,224,0,0.6);
     }
 
+    /* Accuracy-test variant of the dot + the results overlay */
+    #calTarget.test {
+      border-color: #46b4ff;
+      background: radial-gradient(circle, #46b4ff 0 8px, transparent 9px);
+      box-shadow: 0 0 20px rgba(70,180,255,0.8);
+    }
+    #testCanvas {
+      position: fixed; z-index: 5; inset: 0; width: 100vw; height: 100vh;
+      pointer-events: none; display: none;
+    }
+    #testCanvas.visible { display: block; }
+
     /* ------------------------- Status + start ------------------------- */
     #status {
       position: fixed; z-index: 7; left: 50%;
@@ -189,6 +201,7 @@
       <button class="tb-btn" data-mode="viz">Visualizer</button>
       <button class="tb-btn" data-mode="compare">Compare</button>
       <button class="tb-btn" data-mode="continuous">Continuous</button>
+      <button class="tb-btn" data-mode="test">Test</button>
     </div>
     <div class="spacer"></div>
     <button id="sweepBtn" class="tb-btn">🔄 Head-sweep: off</button>
@@ -212,8 +225,18 @@
     <label><input type="checkbox" data-cfg="headPoseMatrix"> Head pose (matrix yaw/pitch)</label>
     <label><input type="checkbox" data-cfg="irisSize"> Iris size (range proxy)</label>
     <label><input type="checkbox" data-cfg="perEye"> Per-eye iris (not averaged)</label>
+    <label style="display:flex; align-items:center; gap:6px;">Basis:
+      <select id="basisSel" style="flex:1; background:rgba(255,255,255,0.1); color:#fff; border:1px solid rgba(255,255,255,0.25); border-radius:6px; padding:3px 6px;">
+        <option value="orig" selected>original (2 squares)</option>
+        <option value="diag">all squares</option>
+        <option value="cross">squares + cross terms</option>
+      </select>
+    </label>
     <hr>
     <div id="labReadout" class="readout">Not calibrated yet.</div>
+    <div class="row" style="margin-top:8px;">
+      <button id="autoTuneBtn" class="tb-btn" style="background:rgba(255,255,255,0.12);">🧪 Auto-tune (CV search)</button>
+    </div>
   </div>
 
   <!-- Mode 2: Signal Visualizer -->
@@ -251,6 +274,20 @@
       <button id="clearContBtn" class="tb-btn" style="background:rgba(255,255,255,0.12);">↺ Clear continuous</button>
     </div>
   </div>
+
+  <!-- Mode 5: Accuracy Test — held-out dots, measured error -->
+  <div id="testPanel" class="panel">
+    <h3>Accuracy Test</h3>
+    <div class="sub">Measures the <b>Lab model</b> on dots it was never calibrated on — the honest number. Look at each blue dot and tap; arrows then show where the model thought you were looking.</div>
+    <hr>
+    <div id="testReadout" class="readout">No test run yet.</div>
+    <div class="row" style="margin-top:8px;">
+      <button id="runTestBtn" class="tb-btn" style="background:rgba(255,255,255,0.12);">▶ Run test</button>
+      <button id="clearTestBtn" class="tb-btn" style="background:rgba(255,255,255,0.12);">✕ Clear</button>
+    </div>
+  </div>
+
+  <canvas id="testCanvas"></canvas>
 
   <!-- Tap-point flash: brief ring where a continuous sample was taken -->
   <div id="tapFlash"></div>
@@ -307,6 +344,18 @@
     //     ≈ 250ms captures the stable fixation before the saccade).
     const MAX_CONTINUOUS = 60;
     const SIGNAL_HISTORY = 8;
+    // Accuracy test: held-out dots offset from the calibration grid, so the
+    // measured error is honest generalization, not training recall.
+    const TEST_POINTS = [
+      [0.30,0.30],[0.70,0.30],[0.30,0.70],[0.70,0.70],
+      [0.50,0.25],[0.50,0.75],[0.25,0.50],[0.75,0.50]
+    ];
+    const TEST_SAMPLE_MS = 600;
+    // Robust per-dot sampling: MAD-trim outlier frames (saccades, tap jiggle),
+    // and redo a dot outright if the trimmed iris signal was too unstable to
+    // have been a fixation. Units are iris offsets in eye-widths (full gaze
+    // range is roughly ±0.09, fixation noise well under 0.01).
+    const TRIM_MAD_K = 3, TRIM_MIN_DEV = 0.004, FIXATION_MAX_STD = 0.015;
 
     // DOM
     const video = document.getElementById("video");
@@ -321,6 +370,7 @@
     const cursorB = document.getElementById("gazeCursorB");
     const targetsEl = document.getElementById("targets");
     const tapFlash = document.getElementById("tapFlash");
+    const testCanvas = document.getElementById("testCanvas");
 
     // ---- State ----
     let faceLandmarker = null;
@@ -334,11 +384,12 @@
     let signalHistory = [];    // rolling ring of recent signals (SIGNAL_HISTORY deep)
     let sampleBuf = null;      // active collector during sampling
     let tileEls = [];
+    let testResults = null;    // [{ t:[nx,ny], p:[nx,ny], err, n }] from the last accuracy test
 
     // Configs. configA is the frozen original algorithm (reference in Compare).
     // configB is the editable experiment. labConfig is Lab's freely-toggled set.
-    const configA = { iris:true, blendshapes:true, headPoseZ:true, headPoseMatrix:false, irisSize:false, perEye:false };
-    let configB  = { iris:true, blendshapes:true, headPoseZ:true, headPoseMatrix:true,  irisSize:false, perEye:false };
+    const configA = { iris:true, blendshapes:true, headPoseZ:true, headPoseMatrix:false, irisSize:false, perEye:false, basis:"orig", lambdaScale:1e-3 };
+    let configB  = { iris:true, blendshapes:true, headPoseZ:true, headPoseMatrix:true,  irisSize:false, perEye:false, basis:"orig", lambdaScale:1e-3 };
     let labConfig = { ...configA };
 
     let fitLab = null, fitA = null, fitB = null, fitCont = null;   // fitted mappings (or null)
@@ -559,10 +610,25 @@
 
     // ---------------------------------------------------------------------
     // REGRESSION — generalized from the main prototype. Operates on flat
-    // vectors of arbitrary length; same standardize → quadratic basis
-    // ([1, ...f, f0², f1²]) → ridge (Gauss-Jordan) approach.
+    // vectors of arbitrary length; standardize → basis expansion → ridge
+    // (Gauss-Jordan). The basis family is configurable:
+    //   orig  — frozen original: squares on the first two features only.
+    //   diag  — squares on every feature.
+    //   cross — squares + all pairwise products. The cross terms are the
+    //           interaction terms: eye-in-head and head pose combine
+    //           multiplicatively (gaze is a rotation composition, not a sum),
+    //           which the additive bases fundamentally cannot represent.
     // ---------------------------------------------------------------------
-    const basis = (f) => [1, ...f, f[0]*f[0], f[1]*f[1]];
+    const BASES = {
+      orig: (f) => [1, ...f, f[0]*f[0], f[1]*f[1]],
+      diag: (f) => { const o = [1, ...f]; for (const v of f) o.push(v*v); return o; },
+      cross: (f) => {
+        const o = [1, ...f];
+        for (let i=0;i<f.length;i++) for (let j=i;j<f.length;j++) o.push(f[i]*f[j]);
+        return o;
+      }
+    };
+    const makeBasis = (cfg) => BASES[cfg.basis] || BASES.orig;
     const dot = (a,b) => a.reduce((s,v,i) => s + v*b[i], 0);
 
     function solveLinear(A, b) {
@@ -584,7 +650,7 @@
     }
 
     // rows: [{ f:[...], t:[nx,ny] }]
-    function fitMapping(rows) {
+    function fitMapping(rows, basis = BASES.orig, lambdaScale = 1e-3) {
       const dim = rows[0].f.length;
       const n = rows.length;
       const mean = new Array(dim).fill(0);
@@ -595,7 +661,7 @@
       const norm = (f) => f.map((v,i) => (v-mean[i])/std[i]);
       const X = rows.map(s => basis(norm(s.f)));
       const k = X[0].length;
-      const lambda = 1e-3 * n;
+      const lambda = lambdaScale * n;
       const AtA = Array.from({length:k}, () => new Array(k).fill(0));
       for (const row of X) for (let i=0;i<k;i++) for (let j=0;j<k;j++) AtA[i][j] += row[i]*row[j];
       for (let i=1;i<k;i++) AtA[i][i] += lambda;
@@ -622,17 +688,81 @@
       }
       if (rows.length < Math.max(5, 2*(rows[0]?.f.length||1)))
         throw new Error(`Too few usable samples (${rows.length})`);
-      return fitMapping(rows);
+      return fitMapping(rows, makeBasis(cfg), cfg.lambdaScale ?? 1e-3);
     }
 
     function predictGaze(fit, cfg, signal) {
       if (!fit) return null;
       const f = buildFeatureVector(signal, cfg);
       if (!f) return null;
-      const b = basis(f.map((v,i) => (v - fit.mean[i]) / fit.std[i]));
+      const b = makeBasis(cfg)(f.map((v,i) => (v - fit.mean[i]) / fit.std[i]));
       const gx = dot(b, fit.coefX), gy = dot(b, fit.coefY);
       if (!Number.isFinite(gx) || !Number.isFinite(gy)) return null;
       return [Math.min(1,Math.max(0,gx)), Math.min(1,Math.max(0,gy))];
+    }
+
+    // ---------------------------------------------------------------------
+    // LEAVE-ONE-DOT-OUT CROSS-VALIDATION — the honest error number.
+    // Frames within one dot are near-duplicates, so a random train/test split
+    // leaks; instead we hold out entire calibration dots: fit on the others,
+    // predict the held-out dot's frames, rotate through all dots. Returns RMS
+    // in screen fraction, or null if not computable.
+    // ---------------------------------------------------------------------
+    function cvError(cfg, samples = calSamples) {
+      const groups = new Map();
+      for (const s of samples) {
+        const k = s.target.join(",");
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(s);
+      }
+      if (groups.size < 4) return null;
+      let se = 0, n = 0;
+      for (const key of groups.keys()) {
+        const train = samples.filter(s => s.target.join(",") !== key);
+        let fit;
+        try { fit = fitFromSamples(cfg, train); } catch (e) { return null; }
+        for (const s of groups.get(key)) {
+          const p = predictGaze(fit, cfg, s.signal);
+          if (!p) continue;
+          se += (p[0]-s.target[0])**2 + (p[1]-s.target[1])**2; n++;
+        }
+      }
+      return n ? Math.sqrt(se / n) : null;
+    }
+
+    // Auto-tune: search basis family × ridge strength × feature toggles by CV
+    // error. Full grid over (basis, λ) first, then greedy single-flag flips
+    // until a round yields no improvement. Yields to the event loop between
+    // fits so the UI stays alive.
+    const LAMBDA_GRID = [1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2];
+    async function tuneSearch(baseCfg, samples, onProgress = () => {}) {
+      const evalCfg = (cfg) => cvError(cfg, samples) ?? Infinity;
+      let best = { ...baseCfg };
+      let bestErr = evalCfg(best);
+      const gridTotal = Object.keys(BASES).length * LAMBDA_GRID.length;
+      let step = 0;
+      for (const basisName of Object.keys(BASES)) {
+        for (const lambdaScale of LAMBDA_GRID) {
+          const cfg = { ...best, basis: basisName, lambdaScale };
+          const err = evalCfg(cfg);
+          if (err < bestErr) { bestErr = err; best = cfg; }
+          onProgress(`grid ${++step}/${gridTotal}`, bestErr);
+          await new Promise(r => setTimeout(r));
+        }
+      }
+      const FLAGS = ["iris","blendshapes","headPoseZ","headPoseMatrix","irisSize","perEye"];
+      for (let round = 0; round < 3; round++) {
+        let improved = false;
+        for (const flag of FLAGS) {
+          const cfg = { ...best, [flag]: !best[flag] };
+          const err = evalCfg(cfg);
+          if (err < bestErr) { bestErr = err; best = cfg; improved = true; }
+          onProgress(`flags ${flag}`, bestErr);
+          await new Promise(r => setTimeout(r));
+        }
+        if (!improved) break;
+      }
+      return { cfg: best, cv: bestErr };
     }
 
     // Speed-adaptive smoothing (same idea as main prototype).
@@ -809,8 +939,32 @@
       });
     }
 
+    // MAD-trim outlier frames within one dot's buffer: frames whose iris
+    // signal sits far from the dot's median were saccades, half-caught blinks,
+    // or tap jiggle — not fixation on the dot. The tolerance floor stops a
+    // very tight MAD from over-dropping normal fixation noise.
+    function madTrim(buf) {
+      const pts = buf.map(s => s.irisAvg).filter(Boolean);
+      if (pts.length < 6) return buf;
+      const med = (a) => { const s = [...a].sort((x,y)=>x-y); return s[s.length>>1]; };
+      const mx = med(pts.map(p=>p[0])), my = med(pts.map(p=>p[1]));
+      const mad = med(pts.map(p => Math.hypot(p[0]-mx, p[1]-my))) || 1e-6;
+      const tol = Math.max(TRIM_MAD_K * mad, TRIM_MIN_DEV);
+      return buf.filter(s => !s.irisAvg || Math.hypot(s.irisAvg[0]-mx, s.irisAvg[1]-my) <= tol);
+    }
+
+    // Std of the iris signal over a buffer — a fixation-quality gate.
+    function irisStd(buf) {
+      const pts = buf.map(s => s.irisAvg).filter(Boolean);
+      if (pts.length < 4) return null;
+      const mx = pts.reduce((a,p)=>a+p[0],0)/pts.length;
+      const my = pts.reduce((a,p)=>a+p[1],0)/pts.length;
+      return Math.sqrt(pts.reduce((a,p)=>a+(p[0]-mx)**2+(p[1]-my)**2,0)/pts.length);
+    }
+
     async function runCalibration() {
-      const prevMode = (mode === "calibrating") ? "lab" : mode;
+      if (mode === "calibrating" || mode === "testing") return;
+      const prevMode = mode;
       mode = "calibrating";
       calBtn.style.display = "none";
       document.querySelectorAll(".panel").forEach(p => p.classList.remove("visible"));
@@ -822,6 +976,8 @@
       signalHistory = [];
       smoothCont = null;
       fitLab = fitA = fitB = fitCont = null;
+      testResults = null;       // old accuracy test measured the old model
+      testCanvas.classList.remove("visible");
 
       let i = 0;
       while (i < CAL_POINTS.length) {
@@ -850,6 +1006,22 @@
           continue;
         }
         let kept = buf;
+        if (!headSweep) {
+          // Robust per-dot sampling: trim outlier frames, then gate on
+          // fixation stability. (Sweep dots skip this — head rotation makes
+          // the iris counter-rotate on purpose, so spread there is signal.)
+          kept = madTrim(buf);
+          const st = irisStd(kept);
+          if (kept.length < MIN_SAMPLES || (st != null && st > FIXATION_MAX_STD)) {
+            setStatus(st != null && st > FIXATION_MAX_STD
+              ? "Eyes weren't steady on that dot — redoing it."
+              : "Not enough clean samples — redoing that dot.");
+            await delay(1200);
+            continue;
+          }
+          if (kept.length < buf.length)
+            console.log(`[PG] dot ${i+1}: trimmed ${buf.length - kept.length}/${buf.length} outlier frames`);
+        }
         if (headSweep && buf.length > SWEEP_PER_DOT) {
           // Even-stride downsample so a long sweep doesn't flood the seed —
           // keeps the head-pose spread but a sane sample count.
@@ -881,6 +1053,102 @@
     }
 
     // ---------------------------------------------------------------------
+    // ACCURACY TEST — measure the Lab model on held-out dots it never saw.
+    // Same tap UX as calibration; per dot we average the (unsmoothed) raw
+    // predictions over the sample window and record predicted-vs-true.
+    // ---------------------------------------------------------------------
+    async function runAccuracyTest() {
+      if (mode === "calibrating" || mode === "testing") return;
+      if (!fitLab) { setStatus("Calibrate first — nothing to test.", true); return; }
+      mode = "testing";
+      document.querySelectorAll(".panel").forEach(p => p.classList.remove("visible"));
+      targetsEl.classList.remove("visible");
+      cursorA.style.display = "none";
+      cursorB.style.display = "none";
+      testCanvas.classList.remove("visible");
+      const results = [];
+      let i = 0;
+      while (i < TEST_POINTS.length) {
+        const [nx, ny] = TEST_POINTS[i];
+        calTarget.style.display = "block";
+        calTarget.classList.add("test");
+        calTarget.classList.remove("sampling");
+        calTarget.style.left = `${nx*100}vw`;
+        calTarget.style.top  = `${ny*100}vh`;
+        setStatus(`Test — look at the blue dot, then tap (${i+1}/${TEST_POINTS.length})`);
+        await waitForTap();
+        calTarget.classList.add("sampling");
+        await delay(SETTLE_MS);
+        sampleBuf = [];
+        await delay(TEST_SAMPLE_MS);
+        const buf = madTrim(sampleBuf);
+        sampleBuf = null;
+        const preds = buf.map(s => predictGaze(fitLab, labConfig, s)).filter(Boolean);
+        if (preds.length < 5) {
+          setStatus("Lost tracking on that dot — redoing it.");
+          await delay(1000);
+          continue;
+        }
+        const px = preds.reduce((a,p)=>a+p[0],0)/preds.length;
+        const py = preds.reduce((a,p)=>a+p[1],0)/preds.length;
+        results.push({ t:[nx,ny], p:[px,py], err: Math.hypot(px-nx, py-ny), n: preds.length });
+        i++;
+      }
+      calTarget.style.display = "none";
+      calTarget.classList.remove("test","sampling");
+      testResults = results;
+      console.log("[PG] Accuracy test:", results.map(r =>
+        `(${r.t[0]},${r.t[1]}) err ${(r.err*100).toFixed(1)}%`).join("  "));
+      enterMode("test");
+    }
+
+    // Overlay: blue ring = true dot, red dot = mean prediction, line = error.
+    function drawTestResults() {
+      if (!testResults) return;
+      const W = window.innerWidth, H = window.innerHeight;
+      const dpr = window.devicePixelRatio || 1;
+      testCanvas.width = W * dpr;
+      testCanvas.height = H * dpr;
+      const t = testCanvas.getContext("2d");
+      t.setTransform(dpr, 0, 0, dpr, 0, 0);
+      t.clearRect(0, 0, W, H);
+      for (const r of testResults) {
+        const tx = r.t[0]*W, ty = r.t[1]*H, px = r.p[0]*W, py = r.p[1]*H;
+        t.beginPath(); t.moveTo(tx, ty); t.lineTo(px, py);
+        t.strokeStyle = "rgba(255,90,90,0.9)"; t.lineWidth = 2.5; t.stroke();
+        t.beginPath(); t.arc(tx, ty, 9, 0, Math.PI*2);
+        t.strokeStyle = "#46b4ff"; t.lineWidth = 3; t.stroke();
+        t.beginPath(); t.arc(px, py, 5, 0, Math.PI*2);
+        t.fillStyle = "#ff5a5a"; t.fill();
+        t.fillStyle = "#fff"; t.font = "12px monospace"; t.textAlign = "center";
+        t.fillText(`${(r.err*100).toFixed(1)}%`, tx, ty - 16);
+      }
+      testCanvas.classList.add("visible");
+    }
+
+    function updateTestReadout() {
+      const el = document.getElementById("testReadout");
+      if (!testResults) {
+        el.innerHTML = `<span class="dim">No test run yet${fitLab ? "" : " — calibrate first"}.</span>`;
+        return;
+      }
+      const errs = testResults.map(r => r.err).sort((a,b)=>a-b);
+      const mean = errs.reduce((a,b)=>a+b,0)/errs.length;
+      const worst = errs[errs.length-1];
+      const median = errs[errs.length>>1];
+      const mdx = testResults.reduce((a,r)=>a+Math.abs(r.p[0]-r.t[0]),0)/testResults.length;
+      const mdy = testResults.reduce((a,r)=>a+Math.abs(r.p[1]-r.t[1]),0)/testResults.length;
+      const pct = (v) => `${(v*100).toFixed(1)}%`;
+      const badge = (v) => `<span class="${v<0.06?"good":v<0.10?"dim":"bad"}">${pct(v)}</span>`;
+      el.innerHTML =
+        `Dots        : ${testResults.length} (held-out)\n` +
+        `Mean error  : ${badge(mean)} of screen\n` +
+        `Median      : ${badge(median)}   Worst: ${badge(worst)}\n` +
+        `Axis |x|/|y|: ${pct(mdx)} / ${pct(mdy)}\n` +
+        `<span class="dim">Config: basis ${labConfig.basis || "orig"}, ${activeFeatureCount(labConfig)} feat, λ ${labConfig.lambdaScale ?? 1e-3}</span>`;
+    }
+
+    // ---------------------------------------------------------------------
     // MODE SWITCHING
     // ---------------------------------------------------------------------
     function enterMode(name) {
@@ -895,6 +1163,7 @@
         cursorA.style.display = "none";
         cursorB.style.display = "none";
       }
+      if (name !== "test") testCanvas.classList.remove("visible");
       if (name === "lab") {
         document.getElementById("labPanel").classList.add("visible");
         targetsEl.classList.add("visible");
@@ -923,6 +1192,13 @@
         setStatus(calSamples.length
           ? "Continuous: tap where you're actually looking."
           : "Continuous: run the 9-dot Calibrate first.");
+      } else if (name === "test") {
+        document.getElementById("testPanel").classList.add("visible");
+        updateTestReadout();
+        if (testResults) drawTestResults();
+        setStatus(fitLab
+          ? "Accuracy Test: measures the Lab model on held-out dots."
+          : "Accuracy Test: calibrate first.");
       }
     }
 
@@ -948,11 +1224,15 @@
       const el = document.getElementById("labReadout");
       const feats = activeFeatureCount(labConfig);
       if (!fitLab) { el.innerHTML = `Features: ${feats}\nNot calibrated yet.`; return; }
+      const cv = cvError(labConfig);
+      const cvBadge = cv == null ? '<span class="dim">—</span>'
+        : `<span class="${cv<0.06?"good":cv<0.10?"dim":"bad"}">${(cv*100).toFixed(1)}%</span>`;
       el.innerHTML =
-        `Features active : ${feats}\n` +
-        `Training RMS    : ${rmsBadge(fitLab)}  (n=${fitLab.n})\n` +
-        `Lower is better. Toggle a signal off —\n` +
-        `if RMS rises, that signal was helping.`;
+        `Features : ${feats}   basis: ${labConfig.basis || "orig"}   λ: ${labConfig.lambdaScale ?? 1e-3}\n` +
+        `Training RMS : ${rmsBadge(fitLab)}  (n=${fitLab.n})\n` +
+        `CV error     : ${cvBadge}  (held-out dots)\n` +
+        `CV is the honest number — training\n` +
+        `RMS flatters overfitting.`;
     }
 
     function updateCompareReadout() {
@@ -1303,6 +1583,65 @@
     document.getElementById("clearContBtn").addEventListener("click", (e) => {
       e.stopPropagation();
       clearContinuous();
+    });
+
+    // Basis select → labConfig + refit (Continuous inherits labConfig too).
+    document.getElementById("basisSel").addEventListener("change", (e) => {
+      labConfig.basis = e.target.value;
+      if (calSamples.length) {
+        try { fitLab = fitFromSamples(labConfig); }
+        catch (err) { console.warn("[PG] basis refit failed:", err.message); fitLab = null; }
+        try { fitCont = fitContinuous(); } catch (err) { fitCont = null; }
+      }
+      updateLabReadout();
+      if (mode === "lab") cursorA.style.display = fitLab ? "block" : "none";
+    });
+
+    // Push labConfig back into the Lab panel controls (after auto-tune).
+    function syncLabControls() {
+      document.querySelectorAll('#labPanel input[type="checkbox"]').forEach(cb => {
+        cb.checked = !!labConfig[cb.dataset.cfg];
+      });
+      document.getElementById("basisSel").value = labConfig.basis || "orig";
+    }
+
+    // Auto-tune: CV search over basis × λ × feature flags, then apply.
+    const autoTuneBtn = document.getElementById("autoTuneBtn");
+    autoTuneBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!calSamples.length) { setStatus("Calibrate first — nothing to tune.", true); return; }
+      if (autoTuneBtn.disabled) return;
+      autoTuneBtn.disabled = true;
+      const before = cvError(labConfig);
+      try {
+        const { cfg, cv } = await tuneSearch(labConfig, calSamples,
+          (stage, err) => setStatus(`Auto-tune ${stage} — best CV ${err === Infinity ? "—" : (err*100).toFixed(1) + "%"}`));
+        labConfig = cfg;
+        syncLabControls();
+        fitLab = fitFromSamples(labConfig);
+        fitCont = fitContinuous();
+        updateLabReadout();
+        if (mode === "lab") cursorA.style.display = fitLab ? "block" : "none";
+        setStatus(`Auto-tune done: CV ${before == null ? "—" : (before*100).toFixed(1) + "%"} → ` +
+          `${(cv*100).toFixed(1)}% (basis ${cfg.basis}, λ ${cfg.lambdaScale})`);
+        console.log("[PG] Auto-tune winner:", JSON.stringify(cfg), "CV", cv);
+      } catch (err) {
+        console.error("[PG] auto-tune failed:", err);
+        setStatus("Auto-tune failed — see console.", true);
+      }
+      autoTuneBtn.disabled = false;
+    });
+
+    // Accuracy-test buttons.
+    document.getElementById("runTestBtn").addEventListener("click", (e) => {
+      e.stopPropagation();
+      runAccuracyTest();
+    });
+    document.getElementById("clearTestBtn").addEventListener("click", (e) => {
+      e.stopPropagation();
+      testResults = null;
+      testCanvas.classList.remove("visible");
+      updateTestReadout();
     });
   </script>
 </body>

@@ -4,6 +4,14 @@ Research + plan for closing the gap between where you look and where the
 cursor lands. Ordered by expected payoff per effort. The playground is the
 proving ground; anything that wins graduates to `index.html`.
 
+**Status:** Phase 0 and Phase 1 are built in the playground — the Test
+mode (held-out error map), basis families incl. cross terms, held-out-dot
+CV with 🧪 Auto-tune, and robust per-dot trimming + fixation gate. On the
+synthetic testbench, CV correctly ranked basis families against held-out
+error and auto-tune improved held-out accuracy; the cross basis needs
+more distinct targets than 9 dots to shine, which is exactly Phase 3's
+job. Awaiting real-hardware measurement.
+
 ## Where we are
 
 - 9-point tap calibration, ~1 s of frames per dot (~200+ samples).
