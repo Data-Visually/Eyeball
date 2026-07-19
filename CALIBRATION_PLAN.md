@@ -69,10 +69,12 @@ are testable on one recorded session.
 
 ## Phase 2 — Better features (the head-pose interaction, done right)
 
-4. **Port the full per-eye feature set to the playground.** The
-   playground's eye feature is only the 2-D iris offset; the main app also
-   uses lid balance and openness, which are the strongest *vertical*
-   signals we have — and vertical is the weak axis.
+4. **Port the full per-eye feature set to the playground.** ✅ DONE — lid
+   balance + openness are now the "Eyelid signals" toggle (default on),
+   and the blink threshold was lowered so looking-down frames aren't
+   discarded. This directly targets the field report "the lower I look,
+   the worse it is". Continuous taps also got ×12 weighting (Phase 4's
+   item 11 brought forward) after the field report that taps did nothing.
 5. **Head-normalized eye features ("data normalization").** The
    appearance-gaze literature's standard trick: use the facial
    transformation matrix to rotate iris offsets into *head* coordinates,
