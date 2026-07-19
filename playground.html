@@ -220,6 +220,7 @@
     <div class="sub">Calibrate once, then toggle signals — each change refits instantly from the same samples and shows the new training error.</div>
     <hr>
     <label><input type="checkbox" data-cfg="iris"        checked> Iris offset (averaged)</label>
+    <label><input type="checkbox" data-cfg="lids"        checked> Eyelid signals (vertical)</label>
     <label><input type="checkbox" data-cfg="blendshapes" checked> Blendshape gaze</label>
     <label><input type="checkbox" data-cfg="headPoseZ"   checked> Head pose (z-proxies)</label>
     <label><input type="checkbox" data-cfg="headPoseMatrix"> Head pose (matrix yaw/pitch)</label>
@@ -255,6 +256,7 @@
     <hr>
     <div style="color:#ff48d1; font-weight:600; margin:4px 0;">Model B signals</div>
     <label><input type="checkbox" data-cfgb="iris"          checked> Iris offset</label>
+    <label><input type="checkbox" data-cfgb="lids"          checked> Eyelid signals (vertical)</label>
     <label><input type="checkbox" data-cfgb="blendshapes"   checked> Blendshape gaze</label>
     <label><input type="checkbox" data-cfgb="headPoseZ"     checked> Head pose (z-proxies)</label>
     <label><input type="checkbox" data-cfgb="headPoseMatrix" checked> Head pose (matrix)</label>
@@ -326,7 +328,17 @@
       [0.12,0.88],[0.50,0.88],[0.88,0.88]
     ];
     const SAMPLE_MS = 1000, SETTLE_MS = 250, MIN_SAMPLES = 8;
-    const BLINK_OPENNESS = 0.12;
+    // True-blink rejection threshold. Deliberately LOW: looking down at the
+    // bottom of the screen legitimately drops openness toward ~0.10 (lids
+    // follow the gaze), and rejecting those frames starves the bottom
+    // calibration dots. A real blink is near zero. The lid features carry the
+    // vertical signal in the droopy-lid regime.
+    const BLINK_OPENNESS = 0.08;
+    // Weight of one continuous-mode tap sample in the regression. The seed is
+    // ~200 frames, so an unweighted tap moves the fit by ~0.5% — invisible.
+    // Each tap is already an average of ~8 stable frames, so a heavy weight is
+    // legitimate; at ×12 a handful of taps visibly bends the mapping locally.
+    const CONT_WEIGHT = 12;
     // Head-sweep calibration: hold your eyes on the dot and ROTATE YOUR HEAD to
     // span a range of head poses for one fixed gaze target. This teaches the
     // regression head-pose invariance (it sees the answer stay put while head
@@ -388,9 +400,11 @@
 
     // Configs. configA is the frozen original algorithm (reference in Compare).
     // configB is the editable experiment. labConfig is Lab's freely-toggled set.
-    const configA = { iris:true, blendshapes:true, headPoseZ:true, headPoseMatrix:false, irisSize:false, perEye:false, basis:"orig", lambdaScale:1e-3 };
-    let configB  = { iris:true, blendshapes:true, headPoseZ:true, headPoseMatrix:true,  irisSize:false, perEye:false, basis:"orig", lambdaScale:1e-3 };
-    let labConfig = { ...configA };
+    const configA = { iris:true, lids:false, blendshapes:true, headPoseZ:true, headPoseMatrix:false, irisSize:false, perEye:false, basis:"orig", lambdaScale:1e-3 };
+    let configB  = { iris:true, lids:true,  blendshapes:true, headPoseZ:true, headPoseMatrix:true,  irisSize:false, perEye:false, basis:"orig", lambdaScale:1e-3 };
+    // Lab defaults to lids ON — the strongest vertical signal (the frozen
+    // reference A predates it, so Compare shows the difference directly).
+    let labConfig = { ...configA, lids:true };
 
     let fitLab = null, fitA = null, fitB = null, fitCont = null;   // fitted mappings (or null)
     let smoothLab = null, smoothA = null, smoothB = null, smoothCont = null;
@@ -484,16 +498,23 @@
     // normalized by eye width = a depth/range proxy), blendshape gaze, the
     // original z-proxies, and yaw/pitch decomposed from the matrix (NEW).
     // ---------------------------------------------------------------------
+    // Ported from the main prototype: iris offset PLUS the two lid-based
+    // vertical signals. Looking down droops the lids over the iris, so the raw
+    // y-offset degrades exactly at the bottom of the screen — but lid balance
+    // (iris nearer top or bottom lid) and openness keep tracking there.
     function eyeFeature(lm, eye) {
       const c1 = lm[eye.c1], c2 = lm[eye.c2];
       const w = Math.hypot(c1.x - c2.x, c1.y - c2.y);
       if (w < 1e-6) return null;
-      const openness = Math.hypot(lm[eye.top].x - lm[eye.bottom].x,
-                                  lm[eye.top].y - lm[eye.bottom].y) / w;
-      if (openness < BLINK_OPENNESS) return null;
+      const top = lm[eye.top], bottom = lm[eye.bottom];
+      const openness = Math.hypot(top.x - bottom.x, top.y - bottom.y) / w;
+      if (openness < BLINK_OPENNESS) return null;   // true blink — no gaze info
       const cx = (c1.x + c2.x) / 2, cy = (c1.y + c2.y) / 2;
       const iris = lm[eye.iris];
-      return [(iris.x - cx) / w, (iris.y - cy) / w];
+      const balance =
+        (Math.hypot(iris.x - top.x, iris.y - top.y) -
+         Math.hypot(iris.x - bottom.x, iris.y - bottom.y)) / w;
+      return { off: [(iris.x - cx) / w, (iris.y - cy) / w], lid: [balance, openness] };
     }
 
     // Mean ring radius / eye width. Bigger = closer to camera. Gives the
@@ -548,7 +569,8 @@
     function extractSignals(landmarks, cats, matrix) {
       const r = eyeFeature(landmarks, RIGHT_EYE);
       const l = eyeFeature(landmarks, LEFT_EYE);
-      const avg = r && l ? [(r[0]+l[0])/2, (r[1]+l[1])/2] : (r || l);
+      const avg = r && l ? [(r.off[0]+l.off[0])/2, (r.off[1]+l.off[1])/2]
+                         : (r?.off ?? l?.off ?? null);
       const sizeR = irisSize(landmarks, RIGHT_EYE, RIGHT_IRIS_RING);
       const sizeL = irisSize(landmarks, LEFT_EYE,  LEFT_IRIS_RING);
       const b = blendGaze(cats) ?? { bx:0, by:0 };
@@ -567,7 +589,8 @@
         face = [m[8] / n, m[9] / n];
       }
       return {
-        irisR:r, irisL:l, irisAvg:avg,
+        irisR: r?.off ?? null, irisL: l?.off ?? null, irisAvg: avg,
+        lidR: r?.lid ?? null, lidL: l?.lid ?? null,
         sizeR, sizeL,
         blend:b,
         headZ:[hx, hy],
@@ -593,6 +616,10 @@
           if (!s.irisAvg) return null;
           f.push(s.irisAvg[0], s.irisAvg[1]);
         }
+      }
+      if (cfg.lids) {
+        if (!s.lidR || !s.lidL) return null;
+        f.push(s.lidR[0], s.lidR[1], s.lidL[0], s.lidL[1]);
       }
       if (cfg.blendshapes) f.push(s.blend.bx, s.blend.by);
       if (cfg.headPoseZ) f.push(s.headZ[0], s.headZ[1]);
@@ -649,10 +676,13 @@
       return M.map((row,i) => row[n] / row[i]);
     }
 
-    // rows: [{ f:[...], t:[nx,ny] }]
+    // rows: [{ f:[...], t:[nx,ny], w? }] — w is a per-sample weight (default 1).
+    // Continuous-mode taps carry a heavy weight so a single corrective tap
+    // visibly bends the mapping instead of drowning among ~200 seed frames.
     function fitMapping(rows, basis = BASES.orig, lambdaScale = 1e-3) {
       const dim = rows[0].f.length;
       const n = rows.length;
+      const sumW = rows.reduce((a,s) => a + (s.w ?? 1), 0);
       const mean = new Array(dim).fill(0);
       for (const s of rows) for (let i=0;i<dim;i++) mean[i] += s.f[i]/n;
       const std = new Array(dim).fill(0);
@@ -661,21 +691,24 @@
       const norm = (f) => f.map((v,i) => (v-mean[i])/std[i]);
       const X = rows.map(s => basis(norm(s.f)));
       const k = X[0].length;
-      const lambda = lambdaScale * n;
+      const lambda = lambdaScale * sumW;
       const AtA = Array.from({length:k}, () => new Array(k).fill(0));
-      for (const row of X) for (let i=0;i<k;i++) for (let j=0;j<k;j++) AtA[i][j] += row[i]*row[j];
+      X.forEach((row, r) => {
+        const w = rows[r].w ?? 1;
+        for (let i=0;i<k;i++) for (let j=0;j<k;j++) AtA[i][j] += w*row[i]*row[j];
+      });
       for (let i=1;i<k;i++) AtA[i][i] += lambda;
       const fitAxis = (axis) => {
         const Atb = new Array(k).fill(0);
-        rows.forEach((s,r) => { for (let i=0;i<k;i++) Atb[i] += X[r][i]*s.t[axis]; });
+        rows.forEach((s,r) => { const w = s.w ?? 1; for (let i=0;i<k;i++) Atb[i] += w*X[r][i]*s.t[axis]; });
         return solveLinear(AtA, Atb);
       };
       const coefX = fitAxis(0), coefY = fitAxis(1);
       let se = 0;
       rows.forEach((s,r) => {
-        se += (dot(X[r],coefX)-s.t[0])**2 + (dot(X[r],coefY)-s.t[1])**2;
+        se += (s.w ?? 1) * ((dot(X[r],coefX)-s.t[0])**2 + (dot(X[r],coefY)-s.t[1])**2);
       });
-      return { mean, std, coefX, coefY, rms: Math.sqrt(se/n), n, dim };
+      return { mean, std, coefX, coefY, rms: Math.sqrt(se/sumW), n, dim };
     }
 
     // Project stored calibration samples through a config and fit.
@@ -684,7 +717,7 @@
       const rows = [];
       for (const s of samples) {
         const f = buildFeatureVector(s.signal, cfg);
-        if (f) rows.push({ f, t: s.target });
+        if (f) rows.push({ f, t: s.target, w: s.weight ?? 1 });
       }
       if (rows.length < Math.max(5, 2*(rows[0]?.f.length||1)))
         throw new Error(`Too few usable samples (${rows.length})`);
@@ -750,7 +783,7 @@
           await new Promise(r => setTimeout(r));
         }
       }
-      const FLAGS = ["iris","blendshapes","headPoseZ","headPoseMatrix","irisSize","perEye"];
+      const FLAGS = ["iris","lids","blendshapes","headPoseZ","headPoseMatrix","irisSize","perEye"];
       for (let round = 0; round < 3; round++) {
         let improved = false;
         for (const flag of FLAGS) {
@@ -805,12 +838,15 @@
     // want the stable fixation before the saccade, not the tap-moment snapshot.
     function averageSignals(buf) {
       if (!buf.length) return null;
-      const out = { irisR:null, irisL:null, irisAvg:null, sizeR:null, sizeL:null,
+      const out = { irisR:null, irisL:null, irisAvg:null, lidR:null, lidL:null,
+                    sizeR:null, sizeL:null,
                     blend:{bx:0,by:0}, headZ:[0,0], headM:null, headMFull:null, nose:[0,0] };
-      let rN=0, lN=0, avgN=0, sR=0, sL=0, hN=0, mN=0, nzN=0;
+      let rN=0, lN=0, avgN=0, ldR=0, ldL=0, sR=0, sL=0, hN=0, mN=0, nzN=0;
       for (const s of buf) {
         if (s.irisR) { if (!out.irisR) out.irisR=[0,0]; out.irisR[0]+=s.irisR[0]; out.irisR[1]+=s.irisR[1]; rN++; }
         if (s.irisL) { if (!out.irisL) out.irisL=[0,0]; out.irisL[0]+=s.irisL[0]; out.irisL[1]+=s.irisL[1]; lN++; }
+        if (s.lidR) { if (!out.lidR) out.lidR=[0,0]; out.lidR[0]+=s.lidR[0]; out.lidR[1]+=s.lidR[1]; ldR++; }
+        if (s.lidL) { if (!out.lidL) out.lidL=[0,0]; out.lidL[0]+=s.lidL[0]; out.lidL[1]+=s.lidL[1]; ldL++; }
         if (s.irisAvg) { if (!out.irisAvg) out.irisAvg=[0,0]; out.irisAvg[0]+=s.irisAvg[0]; out.irisAvg[1]+=s.irisAvg[1]; avgN++; }
         if (s.sizeR != null) { out.sizeR = (out.sizeR ?? 0) + s.sizeR; sR++; }
         if (s.sizeL != null) { out.sizeL = (out.sizeL ?? 0) + s.sizeL; sL++; }
@@ -823,6 +859,8 @@
       if (out.irisR) { out.irisR[0]/=rN; out.irisR[1]/=rN; } else out.irisR = null;
       if (out.irisL) { out.irisL[0]/=lN; out.irisL[1]/=lN; } else out.irisL = null;
       if (out.irisAvg) { out.irisAvg[0]/=avgN; out.irisAvg[1]/=avgN; } else out.irisAvg = null;
+      if (out.lidR) { out.lidR[0]/=ldR; out.lidR[1]/=ldR; } else out.lidR = null;
+      if (out.lidL) { out.lidL[0]/=ldL; out.lidL[1]/=ldL; } else out.lidL = null;
       out.sizeR = sR ? out.sizeR/sR : null;
       out.sizeL = sL ? out.sizeL/sL : null;
       out.blend.bx/=n; out.blend.by/=n;
@@ -864,10 +902,10 @@
       }
       el.innerHTML =
         `Seed         : ${calSamples.length} samples (fixed)\n` +
-        `Continuous   : ${continuousSamples.length} / ${MAX_CONTINUOUS} (FIFO)\n` +
+        `Continuous   : ${continuousSamples.length} / ${MAX_CONTINUOUS} (FIFO, ×${CONT_WEIGHT} weight)\n` +
         `Features     : ${feats}\n` +
         `RMS now      : ${rmsBadge(fitCont)}  over ${fitCont?.n ?? "?"} samples\n` +
-        `<span class="dim">Tap where you're actually looking.</span>`;
+        `<span class="dim">Tap where you're actually looking —\neach tap tugs the mapping toward it.</span>`;
     }
 
     // Flash a ring at a tap location. Restarts the animation each call.
@@ -889,7 +927,7 @@
       let sig = averageSignals(signalHistory);
       if (!sig) sig = latestSignal;
       if (!sig) { setStatus("No face signal at tap — try again."); return false; }
-      continuousSamples.push({ signal: sig, target: [nx, ny] });
+      continuousSamples.push({ signal: sig, target: [nx, ny], weight: CONT_WEIGHT });
       while (continuousSamples.length > MAX_CONTINUOUS) continuousSamples.shift();
       fitCont = fitContinuous();
       smoothCont = null; // re-anchor smoothing to the new model
@@ -1206,6 +1244,7 @@
       // count features a config produces (for readouts)
       let n = 0;
       if (cfg.iris)         n += cfg.perEye ? 4 : 2;
+      if (cfg.lids)         n += 4;
       if (cfg.blendshapes)  n += 2;
       if (cfg.headPoseZ)    n += 2;
       if (cfg.headPoseMatrix) n += 2;
