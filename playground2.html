@@ -461,86 +461,78 @@
     }
 
     // -------------------------------------------------------------------------
-    // Robust Feature Extraction & Standardized Ridge Solver
+    // Proven 22-D Feature Vector & 27-Term Quadratic Ridge Solver (from index.html)
     // -------------------------------------------------------------------------
+    const GAZE_BLENDSHAPES = [
+      "eyeLookInLeft", "eyeLookOutLeft", "eyeLookUpLeft", "eyeLookDownLeft",
+      "eyeLookInRight", "eyeLookOutRight", "eyeLookUpRight", "eyeLookDownRight"
+    ];
+    let blendIdx = null;
+    function blendGaze(categories) {
+      if (!categories) return new Array(GAZE_BLENDSHAPES.length).fill(0);
+      if (!blendIdx) {
+        blendIdx = {};
+        categories.forEach((c, i) => { blendIdx[c.categoryName] = i; });
+      }
+      return GAZE_BLENDSHAPES.map((n) => categories[blendIdx[n]]?.score ?? 0);
+    }
+
     function eyeFeature(lm, eye) {
       const c1 = lm[eye.c1], c2 = lm[eye.c2];
-      const w = Math.hypot(c1.x - c2.x, c1.y - c2.y) || 1e-6;
+      const w = Math.hypot(c1.x - c2.x, c1.y - c2.y);
+      if (w < 1e-6) return null;
       const top = lm[eye.top], bottom = lm[eye.bottom];
       const openness = Math.hypot(top.x - bottom.x, top.y - bottom.y) / w;
-      const cx = (c1.x + c2.x) / 2, cy = (c1.y + c2.y) / 2;
+      if (openness < 0.08) return null; // blink check
+      const cx = (c1.x + c2.x) / 2;
+      const cy = (c1.y + c2.y) / 2;
       const iris = lm[eye.iris];
       const balance =
         (Math.hypot(iris.x - top.x, iris.y - top.y) -
          Math.hypot(iris.x - bottom.x, iris.y - bottom.y)) / w;
-      return { off: [(iris.x - cx) / w, (iris.y - cy) / w], lid: [balance, openness] };
+      return [(iris.x - cx) / w, (iris.y - cy) / w, balance, openness];
     }
 
     function extractSignal(lm, blendshapes) {
       const r = eyeFeature(lm, RIGHT_EYE);
       const l = eyeFeature(lm, LEFT_EYE);
-      if (!r || !l) return null;
+      if (!r && !l) return null;
+      const rr = r ?? l, ll = l ?? r;
+      const b = blendGaze(blendshapes);
+      const hx = lm[234].z - lm[454].z; // cheek depth (yaw proxy)
+      const hy = lm[10].z - lm[152].z;  // forehead - chin depth (pitch proxy)
+      const outerR = lm[33], outerL = lm[263];
+      const roll = Math.atan2(outerL.y - outerR.y, outerL.x - outerR.x);
+      const iod  = Math.hypot(outerL.x - outerR.x, outerL.y - outerR.y);
+      const nose = lm[1];
 
-      const irisX = (r.off[0] + l.off[0]) / 2;
-      const irisY = (r.off[1] + l.off[1]) / 2;
-      const lidBal = (r.lid[0] + l.lid[0]) / 2;
-      const lidOpen = (r.lid[1] + l.lid[1]) / 2;
-
-      let bsX = 0, bsY = 0, blinkLeft = 0, blinkRight = 0;
+      let blinkLeft = 0, blinkRight = 0;
       if (blendshapes) {
         for (const cat of blendshapes) {
-          if (cat.categoryName === "eyeLookInRight")  bsX -= cat.score;
-          if (cat.categoryName === "eyeLookOutRight") bsX += cat.score;
-          if (cat.categoryName === "eyeLookInLeft")   bsX += cat.score;
-          if (cat.categoryName === "eyeLookOutLeft")  bsX -= cat.score;
-          if (cat.categoryName === "eyeLookUpRight" || cat.categoryName === "eyeLookUpLeft") bsY -= cat.score;
-          if (cat.categoryName === "eyeLookDownRight" || cat.categoryName === "eyeLookDownLeft") bsY += cat.score;
           if (cat.categoryName === "eyeBlinkLeft")  blinkLeft = cat.score;
           if (cat.categoryName === "eyeBlinkRight") blinkRight = cat.score;
         }
       }
 
-      const nose = lm[1];
-      const headX = nose.x - 0.5;
-      const headY = nose.y - 0.5;
-
       return {
-        irisX, irisY, lidBal, lidOpen, bsX, bsY, headX, headY,
+        f: [...rr, ...ll, ...b, hx, hy, roll, nose.x, nose.y, iod],
         blinkLeft, blinkRight,
         rightIris: lm[RIGHT_IRIS_CENTER],
         leftIris: lm[LEFT_IRIS_CENTER]
       };
     }
 
-    function buildFeatureVector(s) {
-      return [
-        s.irisX, s.irisY,
-        s.lidBal, s.lidOpen,
-        s.bsX, s.bsY,
-        s.headX, s.headY
-      ];
-    }
-
-    function basisCross(f) {
-      const o = [1, ...f];
-      for (let i = 0; i < f.length; i++) {
-        for (let j = i; j < f.length; j++) {
-          o.push(f[i] * f[j]);
-        }
-      }
-      return o;
-    }
-
-    const dot = (a, b) => a.reduce((sum, v, i) => sum + v * b[i], 0);
+    const basis = (f) =>
+      [1, ...f, f[0] * f[0], f[1] * f[1], f[4] * f[4], f[5] * f[5]];
+    const dot = (a, b) => a.reduce((s, v, i) => s + v * b[i], 0);
 
     function solveLinearSystem(A, b) {
       const n = b.length;
       const M = A.map((row, i) => [...row, b[i]]);
       for (let col = 0; col < n; col++) {
         let piv = col;
-        for (let r = col + 1; r < n; r++) {
+        for (let r = col + 1; r < n; r++)
           if (Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r;
-        }
         [M[col], M[piv]] = [M[piv], M[col]];
         if (Math.abs(M[col][col]) < 1e-12) return new Array(n).fill(0);
         for (let r = 0; r < n; r++) {
@@ -553,33 +545,26 @@
     }
 
     function fitRidge(samples, useRidge = true) {
-      if (samples.length < 6) return null;
+      if (samples.length < 10) return null;
+      const dim = samples[0].f.length;
+      const n = samples.length;
 
-      const rawRows = samples.map(s => buildFeatureVector(s.signal));
-      const dim = rawRows[0].length;
-      const n = rawRows.length;
-
-      // Feature Standardization (Mean & Std Dev)
       const mean = new Array(dim).fill(0);
-      for (const f of rawRows) for (let i = 0; i < dim; i++) mean[i] += f[i] / n;
+      for (const s of samples) for (let i = 0; i < dim; i++) mean[i] += s.f[i] / n;
       const std = new Array(dim).fill(0);
-      for (const f of rawRows) for (let i = 0; i < dim; i++) std[i] += (f[i] - mean[i]) ** 2 / n;
+      for (const s of samples) for (let i = 0; i < dim; i++) std[i] += (s.f[i] - mean[i]) ** 2 / n;
       for (let i = 0; i < dim; i++) std[i] = Math.max(Math.sqrt(std[i]), 1e-6);
 
       const norm = (f) => f.map((v, i) => (v - mean[i]) / std[i]);
-      const X = rawRows.map(f => basisCross(norm(f)));
+      const X = samples.map(s => basis(norm(s.f)));
       const k = X[0].length;
 
-      const lambda = useRidge ? 0.02 * n : 1e-6;
+      const lambda = useRidge ? 1e-3 * n : 1e-6;
       const AtA = Array.from({ length: k }, () => new Array(k).fill(0));
-      X.forEach((row) => {
-        for (let i = 0; i < k; i++) {
-          for (let j = 0; j < k; j++) {
-            AtA[i][j] += row[i] * row[j];
-          }
-        }
-      });
-      for (let i = 1; i < k; i++) AtA[i][i] += lambda; // L2 penalty on non-bias terms
+      for (const row of X)
+        for (let i = 0; i < k; i++)
+          for (let j = 0; j < k; j++) AtA[i][j] += row[i] * row[j];
+      for (let i = 1; i < k; i++) AtA[i][i] += lambda;
 
       const fitAxis = (axis) => {
         const Atb = new Array(k).fill(0);
@@ -589,17 +574,16 @@
         return solveLinearSystem(AtA, Atb);
       };
 
-      const cx = fitAxis(0), cy = fitAxis(1);
-      return { mean, std, cx, cy };
+      const coefX = fitAxis(0), coefY = fitAxis(1);
+      return { mean, std, coefX, coefY };
     }
 
     function evalFit(fit, signal) {
-      if (!fit) return [0.5, 0.5];
-      const rawF = buildFeatureVector(signal);
-      const normF = rawF.map((v, i) => (v - fit.mean[i]) / fit.std[i]);
-      const b = basisCross(normF);
-      const gx = dot(b, fit.cx);
-      const gy = dot(b, fit.cy);
+      if (!fit || !signal?.f) return [0.5, 0.5];
+      const normF = signal.f.map((v, i) => (v - fit.mean[i]) / fit.std[i]);
+      const b = basis(normF);
+      const gx = dot(b, fit.coefX);
+      const gy = dot(b, fit.coefY);
       return [Math.max(0, Math.min(1, gx)), Math.max(0, Math.min(1, gy))];
     }
 
@@ -642,22 +626,9 @@
         sampleBuf = null;
 
         if (currentBuf && currentBuf.length >= 4) {
-          const avg = {
-            irisX: 0, irisY: 0, lidBal: 0, lidOpen: 0, bsX: 0, bsY: 0, headX: 0, headY: 0
-          };
           for (const s of currentBuf) {
-            avg.irisX  += s.irisX;  avg.irisY  += s.irisY;
-            avg.lidBal += s.lidBal; avg.lidOpen += s.lidOpen;
-            avg.bsX    += s.bsX;    avg.bsY    += s.bsY;
-            avg.headX  += s.headX;  avg.headY  += s.headY;
+            calSamples.push({ f: s.f, target: [nx, ny] });
           }
-          const len = currentBuf.length;
-          avg.irisX  /= len; avg.irisY  /= len;
-          avg.lidBal /= len; avg.lidOpen /= len;
-          avg.bsX    /= len; avg.bsY    /= len;
-          avg.headX  /= len; avg.headY  /= len;
-
-          calSamples.push({ signal: avg, target: [nx, ny] });
         }
       }
 
