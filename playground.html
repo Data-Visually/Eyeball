@@ -246,6 +246,9 @@
     <h3>Signals (live)</h3>
     <div id="poseReadout" class="readout">—</div>
     <hr>
+    <div class="sub">Metric Camera Distance (IPD)</div>
+    <div id="ipdReadout" class="readout">Acquiring iris landmarks…</div>
+    <hr>
     <div class="sub">Blendshapes</div>
     <div id="blendBars"></div>
   </div>
@@ -263,6 +266,20 @@
     <label><input type="checkbox" data-cfgb="headPoseMatrix" checked> Head pose (matrix)</label>
     <label><input type="checkbox" data-cfgb="irisSize"> Iris size (range proxy)</label>
     <label><input type="checkbox" data-cfgb="perEye"> Per-eye iris</label>
+    <hr>
+    <div style="color:#00ff88; font-weight:600; margin:4px 0;">Model B Filters &amp; Guards</div>
+    <label><input type="checkbox" id="useOneEuroB" checked> Use $1\text{€}$ Filter (vs EMA)</label>
+    <label><input type="checkbox" id="useBlinkGuardB" checked> Blink &amp; Squint Guard</label>
+    <div class="row">
+      <span class="sub">$1\text{€}$ Min Cutoff ($f_{c,\text{min}}$):</span>
+      <input type="range" id="minCutoffSlider" min="0.1" max="3.0" step="0.1" value="1.0">
+      <span id="minCutoffVal" style="font-size:11px; width:28px;">1.0</span>
+    </div>
+    <div class="row">
+      <span class="sub">$1\text{€}$ Speed Beta ($\beta$):</span>
+      <input type="range" id="betaSlider" min="0.001" max="0.05" step="0.001" value="0.007">
+      <span id="betaVal" style="font-size:11px; width:38px;">0.007</span>
+    </div>
     <hr>
     <div id="compareReadout" class="readout">Calibrate to fit both models.</div>
   </div>
@@ -806,11 +823,86 @@
       return [smoothed[0] + (g[0]-smoothed[0])*a, smoothed[1] + (g[1]-smoothed[1])*a];
     }
 
+    // ---------------------------------------------------------------------
+    // ONE EURO FILTER & BLINK GUARD
+    // ---------------------------------------------------------------------
+    class OneEuroFilter {
+      constructor(minCutoff = 1.0, beta = 0.007, dCutoff = 1.0) {
+        this.minCutoff = minCutoff;
+        this.beta = beta;
+        this.dCutoff = dCutoff;
+        this.xFilter = null;
+        this.dxFilter = null;
+        this.lastTime = null;
+      }
+      alpha(cutoff, dt) {
+        const tau = 1.0 / (2 * Math.PI * cutoff);
+        return 1.0 / (1.0 + tau / dt);
+      }
+      filter(val, timestamp) {
+        if (this.lastTime === null) {
+          this.lastTime = timestamp;
+          this.xFilter = val;
+          this.dxFilter = 0;
+          return val;
+        }
+        const dt = Math.max((timestamp - this.lastTime) / 1000, 0.001);
+        this.lastTime = timestamp;
+        const dVal = (val - this.xFilter) / dt;
+        const edVal = this.dxFilter + this.alpha(this.dCutoff, dt) * (dVal - this.dxFilter);
+        this.dxFilter = edVal;
+        const cutoff = this.minCutoff + this.beta * Math.abs(edVal);
+        const exVal = this.xFilter + this.alpha(cutoff, dt) * (val - this.xFilter);
+        this.xFilter = exVal;
+        return exVal;
+      }
+      reset() { this.xFilter = null; this.dxFilter = null; this.lastTime = null; }
+    }
+
+    class OneEuroPointFilter {
+      constructor(minCutoff = 1.0, beta = 0.007, dCutoff = 1.0) {
+        this.fx = new OneEuroFilter(minCutoff, beta, dCutoff);
+        this.fy = new OneEuroFilter(minCutoff, beta, dCutoff);
+      }
+      setParams(minCutoff, beta) {
+        this.fx.minCutoff = minCutoff; this.fx.beta = beta;
+        this.fy.minCutoff = minCutoff; this.fy.beta = beta;
+      }
+      filter(pt, timestamp) {
+        return [this.fx.filter(pt[0], timestamp), this.fy.filter(pt[1], timestamp)];
+      }
+      reset() { this.fx.reset(); this.fy.reset(); }
+    }
+    const oneEuroFilterB = new OneEuroPointFilter(1.0, 0.007);
+
     // Position a cursor + highlight the tile it lands on.
-    function updateCursor(smoothedRef, fit, cfg, signal, cursorEl, cls, lookedRef) {
+    function updateCursor(smoothedRef, fit, cfg, signal, cursorEl, cls, lookedRef, isModelB = false) {
       const g = predictGaze(fit, cfg, signal);
       if (!g) return { smoothed: smoothedRef, looked: lookedRef };
-      const sm = smooth(smoothedRef, g);
+
+      // Blink & Squint Guard (Model B)
+      const useGuardB = document.getElementById("useBlinkGuardB")?.checked ?? true;
+      if (isModelB && useGuardB && latestCats) {
+        const idxL = latestCats.findIndex(c => c.categoryName === "eyeBlinkLeft");
+        const idxR = latestCats.findIndex(c => c.categoryName === "eyeBlinkRight");
+        const bl = latestCats[idxL]?.score ?? 0;
+        const br = latestCats[idxR]?.score ?? 0;
+        if (bl > 0.40 || br > 0.40) {
+          if (smoothedRef) return { smoothed: smoothedRef, looked: lookedRef };
+        }
+      }
+
+      let sm;
+      const useOneEuroB = document.getElementById("useOneEuroB")?.checked ?? true;
+      if (isModelB && useOneEuroB) {
+        const mc = parseFloat(document.getElementById("minCutoffSlider")?.value || "1.0");
+        const beta = parseFloat(document.getElementById("betaSlider")?.value || "0.007");
+        oneEuroFilterB.setParams(mc, beta);
+        sm = oneEuroFilterB.filter(g, performance.now());
+      } else {
+        sm = smooth(smoothedRef, g);
+      }
+
       const px = sm[0]*window.innerWidth, py = sm[1]*window.innerHeight;
       cursorEl.style.transform = `translate3d(${px}px,${py}px,0)`;
       let hit = null;
@@ -1335,6 +1427,18 @@
         `euler (raw)  yaw ${deg(hp?.yaw)}  pitch ${deg(hp?.pitch)}  roll ${deg(hp?.roll)}\n` +
         `head-pose z-proxy  hx ${(hz?.[0]??0).toFixed(3)}  hy ${(hz?.[1]??0).toFixed(3)}\n` +
         `nose (${signal?.nose?.[0].toFixed(3) ?? "?"}, ${signal?.nose?.[1].toFixed(3) ?? "?"})`;
+
+      // Metric IPD Distance Readout
+      const ipdEl = document.getElementById("ipdReadout");
+      if (ipdEl && signal?.irisR && signal?.irisL) {
+        const ipdPx = Math.hypot(
+          (signal.irisR[0] - signal.irisL[0]) * canvas.width,
+          (signal.irisR[1] - signal.irisL[1]) * canvas.height
+        );
+        const fx = canvas.width * 0.866;
+        const distCm = (6.3 * fx) / (ipdPx || 1);
+        ipdEl.innerHTML = `IPD: <span class="good">${ipdPx.toFixed(1)} px</span>   Distance: <span class="good">${distCm.toFixed(1)} cm</span> (${(distCm / 2.54).toFixed(1)} in)`;
+      }
     }
 
     // ---------------------------------------------------------------------
@@ -1483,7 +1587,7 @@
               smoothA = r.smoothed; lookedA = r.looked;
             }
             if (fitB) {
-              const r = updateCursor(smoothB, fitB, configB, sig, cursorB, "lookedB", lookedB);
+              const r = updateCursor(smoothB, fitB, configB, sig, cursorB, "lookedB", lookedB, true);
               smoothB = r.smoothed; lookedB = r.looked;
             }
             // live agreement distance
@@ -1581,6 +1685,7 @@
     // Compare checkboxes → update configB + refit
     document.querySelectorAll('#comparePanel input[type="checkbox"]').forEach(cb => {
       cb.addEventListener("change", () => {
+        if (!cb.dataset.cfgb) return;
         configB[cb.dataset.cfgb] = cb.checked;
         if (calSamples.length) {
           try { fitB = fitFromSamples(configB); }
@@ -1590,6 +1695,11 @@
         cursorB.style.display = fitB ? "block" : "none";
       });
     });
+
+    const mcSlider = document.getElementById("minCutoffSlider");
+    const bSlider = document.getElementById("betaSlider");
+    if (mcSlider) mcSlider.addEventListener("input", () => document.getElementById("minCutoffVal").textContent = mcSlider.value);
+    if (bSlider) bSlider.addEventListener("input", () => document.getElementById("betaVal").textContent = bSlider.value);
 
     // Lab checkboxes also affect Continuous (it reuses labConfig), so refit
     // fitCont from seed+continuous whenever the signal set changes.
