@@ -421,26 +421,39 @@
       });
     }
 
+    let handLoading = false;
     async function loadHandModel() {
       if (handLandmarker) return;
+      if (handLoading) return;
+      handLoading = true;
+      wandReadout.innerHTML = `<span class="accent">Loading hand model...</span>`;
       setStatus("Loading Hand Landmarker model...");
-      const options = {
-        baseOptions: {
-          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
-          delegate: "GPU"
-        },
-        runningMode: "VIDEO",
-        numHands: 2
-      };
       try {
-        handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, options);
-      } catch (gpuErr) {
-        console.warn("[Eyeball] Hand GPU delegate failed, retrying CPU:", gpuErr);
-        options.baseOptions.delegate = "CPU";
-        handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, options);
+        if (!filesetResolver) await initVision();
+        const options = {
+          baseOptions: {
+            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+            delegate: "GPU"
+          },
+          runningMode: "VIDEO",
+          numHands: 2
+        };
+        try {
+          handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, options);
+        } catch (gpuErr) {
+          console.warn("[PG2] Hand GPU delegate failed, retrying CPU:", gpuErr);
+          options.baseOptions.delegate = "CPU";
+          handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, options);
+        }
+        wandReadout.innerHTML = `<span class="good">Hand model active ✔</span>\nPoint index finger &amp; flick to trigger particle bursts!`;
+        setStatus("Hand model loaded ✔");
+      } catch (err) {
+        console.error("[PG2] Hand model load error:", err);
+        wandReadout.innerHTML = `<span class="bad">Hand model load failed:</span>\n${err.message || err}`;
+        setStatus("Failed to load hand model. Check network access.", true);
+      } finally {
+        handLoading = false;
       }
-      wandReadout.innerHTML = `<span class="good">Hand model active ✔</span>\nPoint index finger &amp; flick to trigger particle bursts!`;
-      setStatus("Hand model loaded ✔");
     }
 
     async function loadPoseModel() {
