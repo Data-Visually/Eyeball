@@ -214,8 +214,8 @@
     <hr>
     <div class="row">
       <span class="sub">Flick Threshold:</span>
-      <input type="range" id="flickSensSlider" min="1.0" max="4.0" step="0.2" value="2.0">
-      <span id="flickSensVal" style="font-size:11px; width:28px;">2.0</span>
+      <input type="range" id="flickSensSlider" min="0.2" max="2.5" step="0.1" value="0.6">
+      <span id="flickSensVal" style="font-size:11px; width:28px;">0.6</span>
     </div>
     <hr>
     <div id="wandReadout" class="readout">Loading hand landmarker…</div>
@@ -681,15 +681,16 @@
     // Wand Particle System & Gesture Detection
     // -------------------------------------------------------------------------
     function spawnParticles(x, y) {
-      for (let i = 0; i < 24; i++) {
+      for (let i = 0; i < 40; i++) {
         const angle = Math.random() * Math.PI * 2;
-        const speed = 3 + Math.random() * 9;
+        const speed = 4 + Math.random() * 12;
         particles.push({
           x, y,
           vx: Math.cos(angle) * speed,
           vy: Math.sin(angle) * speed,
           life: 1.0,
-          color: `hsl(${Math.floor(Math.random() * 60 + 280)}, 100%, 70%)`
+          radius: 6 + Math.random() * 8,
+          color: `hsl(${Math.floor(Math.random() * 80 + 260)}, 100%, 75%)`
         });
       }
     }
@@ -698,14 +699,17 @@
       for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
         p.x += p.vx; p.y += p.vy;
-        p.vy += 0.2; // Gravity
-        p.life -= 0.03;
+        p.vy += 0.25; // Gravity
+        p.life -= 0.025;
         if (p.life <= 0) particles.splice(i, 1);
         else {
           ctx.beginPath();
-          ctx.arc(p.x, p.y, 4 * p.life, 0, Math.PI * 2);
+          ctx.arc(p.x, p.y, (p.radius || 6) * p.life, 0, Math.PI * 2);
           ctx.fillStyle = p.color;
+          ctx.shadowBlur = 12;
+          ctx.shadowColor = p.color;
           ctx.fill();
+          ctx.shadowBlur = 0;
         }
       }
     }
@@ -713,9 +717,9 @@
     function checkWandGesture(tip, timestamp) {
       const tx = tip.x * canvas.width, ty = tip.y * canvas.height;
       fingerTrail.push({ x: tx, y: ty, t: timestamp });
-      if (fingerTrail.length > 10) fingerTrail.shift();
+      if (fingerTrail.length > 8) fingerTrail.shift();
 
-      if (fingerTrail.length >= 4) {
+      if (fingerTrail.length >= 3) {
         const first = fingerTrail[0];
         const last = fingerTrail[fingerTrail.length - 1];
         const dt = (last.t - first.t) / 1000;
@@ -723,11 +727,19 @@
         const speed = dist / (dt || 0.001);
 
         const sensThreshold = parseFloat(flickSensSlider.value) * 1000;
-        if (speed > sensThreshold && timestamp - lastFlickTime > 400) {
+        const triggered = speed > sensThreshold && timestamp - lastFlickTime > 300;
+
+        if (triggered) {
           lastFlickTime = timestamp;
           spawnParticles(tx, ty);
-          wandReadout.innerHTML = `<span class="good">✨ SWISH / FLICK DETECTED!</span>\nSpeed: ${speed.toFixed(0)} px/s`;
         }
+
+        const statusText = triggered
+          ? `<span class="good">✨ SWISH / FLICK DETECTED!</span>`
+          : (timestamp - lastFlickTime < 600 ? `<span class="good">✨ SPELL CASTING...</span>` : `<span class="dim">Tracking fingertip...</span>`);
+
+        wandReadout.innerHTML = `${statusText}\n` +
+          `Speed: <span class="${triggered ? 'good' : 'accent'}">${speed.toFixed(0)} px/s</span> (Threshold: ${sensThreshold.toFixed(0)} px/s)`;
       }
     }
 
