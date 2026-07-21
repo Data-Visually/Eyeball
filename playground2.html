@@ -183,6 +183,7 @@
     <div class="sub">Compare baseline <span style="color:#00ff44">Cursor A (EMA)</span> vs. enhanced <span style="color:#ff48d1">Cursor B ($1\text{€}$ Filter + Blink Suppression)</span>.</div>
     <hr>
     <label><input type="checkbox" id="blinkGuardToggle" checked> Blink &amp; Squint Guard (B)</label>
+    <label><input type="checkbox" id="headToggle"> Include Head Pose (Eyes Only if off)</label>
     <label><input type="checkbox" id="ridgeToggle" checked> Ridge Regression (L2 Penalty)</label>
     <div class="row">
       <span class="sub">$1\text{€}$ Min Cutoff ($f_{c,\text{min}}$):</span>
@@ -514,8 +515,12 @@
         }
       }
 
+      const includeHead = document.getElementById("headToggle")?.checked ?? false;
+      const fullF = [...rr, ...ll, ...b, hx, hy, roll, nose.x, nose.y, iod];
+      const f = includeHead ? fullF : fullF.slice(0, 16);
+
       return {
-        f: [...rr, ...ll, ...b, hx, hy, roll, nose.x, nose.y, iod],
+        f,
         blinkLeft, blinkRight,
         rightIris: lm[RIGHT_IRIS_CENTER],
         leftIris: lm[LEFT_IRIS_CENTER]
