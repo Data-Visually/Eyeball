@@ -1,0 +1,896 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Eyeball — Playground 2 (Enhancements Sandbox)</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      overflow: hidden; background: #000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      -webkit-user-select: none; user-select: none; touch-action: manipulation;
+      color: #fff;
+    }
+
+    #video, #overlay {
+      position: fixed; inset: 0; width: 100%; height: 100%;
+      object-fit: cover; transform: scaleX(-1);
+    }
+    #overlay { z-index: 2; pointer-events: none; }
+
+    /* Top navigation bar */
+    #topbar {
+      position: fixed; z-index: 9;
+      top: max(8px, env(safe-area-inset-top)); left: 8px; right: 8px;
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      pointer-events: none;
+    }
+    #topbar > * { pointer-events: auto; }
+    .tb-link, .tb-btn {
+      background: rgba(0,0,0,0.65); color: #fff;
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 999px; padding: 7px 12px; font-size: 13px;
+      text-decoration: none; cursor: pointer; white-space: nowrap;
+    }
+    .tb-link:hover, .tb-btn:hover { background: rgba(40,40,40,0.85); }
+    #modes { display: flex; gap: 4px; }
+    .tb-btn.active { background: #00c838; color: #002a0c; border-color: #00c838; }
+    #calibrateBtn { background: #ffcc00; color: #2a1f00; border-color: #ffcc00; font-weight: 600; }
+    #calibrateBtn:hover { background: #ffd633; }
+    .spacer { flex: 1; }
+
+    /* Panels */
+    .panel {
+      position: fixed; z-index: 8;
+      bottom: max(12px, env(safe-area-inset-bottom));
+      max-height: 48vh; width: min(340px, 92vw);
+      overflow-y: auto;
+      background: rgba(10,12,16,0.85);
+      border: 1px solid rgba(255,255,255,0.18);
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      border-radius: 14px; padding: 12px 14px; font-size: 13px;
+      display: none;
+    }
+    .panel.visible { display: block; }
+    #gazePanel    { left: 8px; }
+    #ipdPanel     { right: 8px; }
+    #wandPanel    { left: 8px; }
+    #sleepPanel   { right: 8px; }
+
+    .panel h3 { margin: 0 0 8px; font-size: 13px; letter-spacing: 0.4px;
+                text-transform: uppercase; color: #00ff88; }
+    .panel .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 5px 0; }
+    .panel label { display: flex; align-items: center; gap: 7px; cursor: pointer; padding: 3px 0; }
+    .panel input[type="checkbox"] { width: 16px; height: 16px; accent-color: #00c838; }
+    .panel input[type="range"] { flex: 1; accent-color: #00ff88; }
+    .panel .sub { color: #9aa; font-size: 11px; margin-bottom: 6px; }
+    .panel hr { border: 0; border-top: 1px solid rgba(255,255,255,0.12); margin: 8px 0; }
+    .readout { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+               background: rgba(0,0,0,0.4); padding: 7px 9px; border-radius: 8px;
+               white-space: pre-wrap; line-height: 1.5; }
+    .readout .good { color: #00ff88; }
+    .readout .bad  { color: #ff7a7a; }
+    .readout .accent { color: #ff48d1; }
+    .readout .dim  { color: #9aa; }
+
+    /* Dual Gaze Cursors */
+    .gcursor {
+      position: fixed; z-index: 5; left: 0; top: 0;
+      width: 32px; height: 32px; margin: -16px 0 0 -16px;
+      border-radius: 50%; pointer-events: none; display: none; will-change: transform;
+    }
+    #gazeCursorA {
+      border: 3px solid #00ff44;
+      box-shadow: 0 0 14px rgba(0,255,68,0.8), inset 0 0 8px rgba(0,255,68,0.5);
+    }
+    #gazeCursorB {
+      border: 3px dashed #ff48d1;
+      box-shadow: 0 0 14px rgba(255,72,209,0.7);
+    }
+    .gcursor-tag {
+      position: absolute; top: -18px; left: 50%; transform: translateX(-50%);
+      font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 4px;
+      background: rgba(0,0,0,0.7);
+    }
+    #gazeCursorA .gcursor-tag { color: #00ff44; }
+    #gazeCursorB .gcursor-tag { color: #ff48d1; }
+
+    /* Calibration Target */
+    #calTarget {
+      position: fixed; z-index: 6; left: 0; top: 0; width: 56px; height: 56px;
+      margin: -28px 0 0 -28px; border-radius: 50%; border: 4px solid #ffcc00;
+      background: radial-gradient(circle, #ffcc00 0 8px, transparent 9px);
+      box-shadow: 0 0 20px rgba(255,204,0,0.8); pointer-events: none; display: none;
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%,100%{transform:scale(1);} 50%{transform:scale(1.25);} }
+    #calTarget.sampling {
+      animation: shrink 0.9s linear forwards; border-color: #00ff44;
+      box-shadow: 0 0 20px rgba(0,255,68,0.8);
+    }
+    @keyframes shrink { from{transform:scale(1.25);} to{transform:scale(0.45);} }
+
+    /* Tile grid */
+    #targets {
+      position: fixed; z-index: 3; inset: 0; display: none;
+      grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr 1fr;
+      gap: 3vmin; padding: 6vmin;
+      padding-top: max(6vmin, env(safe-area-inset-top));
+      padding-bottom: max(14vmin, env(safe-area-inset-bottom));
+      box-sizing: border-box; pointer-events: none;
+    }
+    #targets.visible { display: grid; }
+    .tile {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 1vmin; border-radius: 18px; border: 3px solid rgba(255,255,255,0.25);
+      background: rgba(0,0,0,0.35); color: #fff; font-size: 3.5vmin;
+      transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+    }
+    .tile .emoji { font-size: 8vmin; }
+    .tile.lookedA { border-color: #00ff44; box-shadow: 0 0 24px rgba(0,255,68,0.45); }
+    .tile.lookedB { border-color: #ff48d1; box-shadow: 0 0 24px rgba(255,72,209,0.45); }
+    .tile.lookedA.lookedB {
+      border-color: #ffe000; box-shadow: 0 0 28px rgba(255,224,0,0.6);
+    }
+
+    #status {
+      position: fixed; z-index: 7; left: 50%;
+      top: max(52px, calc(env(safe-area-inset-top) + 44px));
+      transform: translateX(-50%); max-width: 90vw; padding: 8px 16px;
+      border-radius: 999px; background: rgba(0,0,0,0.7); color: #fff;
+      font-size: 13px; text-align: center; transition: opacity 0.4s; pointer-events: none;
+    }
+    #status.error { background: rgba(180,30,30,0.85); }
+    #status.hidden { opacity: 0; }
+    #start {
+      position: fixed; z-index: 10; inset: 0; display: flex;
+      align-items: center; justify-content: center; background: #000;
+      color: #fff; border: 0; font-size: 20px; cursor: pointer;
+      flex-direction: column; gap: 12px;
+    }
+    #start .sub { font-size: 13px; color: #9aa; max-width: 80vw; text-align: center; }
+    #start.hidden { display: none; }
+    #start a { color: #00ff88; }
+  </style>
+</head>
+<body>
+  <video id="video" autoplay muted playsinline webkit-playsinline></video>
+  <canvas id="overlay"></canvas>
+
+  <div id="topbar">
+    <a class="tb-link" href="index.html">← Main</a>
+    <a class="tb-link" href="playground.html">Playground 1</a>
+    <div id="modes">
+      <button class="tb-btn active" data-mode="gaze">🎯 Gaze Filters</button>
+      <button class="tb-btn" data-mode="ipd">📏 Metric IPD</button>
+      <button class="tb-btn" data-mode="wand">🪄 Wand Gesture</button>
+      <button class="tb-btn" data-mode="sleep">💤 Model Sleep</button>
+    </div>
+    <div class="spacer"></div>
+    <button id="calibrateBtn">🎯 Calibrate</button>
+  </div>
+
+  <div id="targets" aria-hidden="true"></div>
+  <div id="gazeCursorA" class="gcursor"><span class="gcursor-tag">A: EMA</span></div>
+  <div id="gazeCursorB" class="gcursor"><span class="gcursor-tag">B: 1€+Blink</span></div>
+  <div id="calTarget"></div>
+  <div id="status">Loading…</div>
+
+  <!-- Mode 1: Gaze Filter Comparison -->
+  <div id="gazePanel" class="panel visible">
+    <h3>Gaze Enhancements Benchmark</h3>
+    <div class="sub">Compare baseline <span style="color:#00ff44">Cursor A (EMA)</span> vs. enhanced <span style="color:#ff48d1">Cursor B ($1\text{€}$ Filter + Blink Suppression)</span>.</div>
+    <hr>
+    <label><input type="checkbox" id="blinkGuardToggle" checked> Blink &amp; Squint Guard (B)</label>
+    <label><input type="checkbox" id="ridgeToggle" checked> Ridge Regression (L2 Penalty)</label>
+    <div class="row">
+      <span class="sub">$1\text{€}$ Min Cutoff ($f_{c,\text{min}}$):</span>
+      <input type="range" id="minCutoffSlider" min="0.1" max="3.0" step="0.1" value="1.0">
+      <span id="minCutoffVal" style="font-size:11px; width:28px;">1.0</span>
+    </div>
+    <div class="row">
+      <span class="sub">$1\text{€}$ Speed Beta ($\beta$):</span>
+      <input type="range" id="betaSlider" min="0.001" max="0.05" step="0.001" value="0.007">
+      <span id="betaVal" style="font-size:11px; width:38px;">0.007</span>
+    </div>
+    <hr>
+    <div id="gazeReadout" class="readout">Calibrate gaze to run live filter comparison.</div>
+  </div>
+
+  <!-- Mode 2: Metric IPD Distance -->
+  <div id="ipdPanel" class="panel">
+    <h3>Metric IPD Distance Estimator</h3>
+    <div class="sub">Computes real-world physical distance ($Z_{\text{cm}}$) using iris centers (landmarks 468 &amp; 473) assuming average human IPD ($\approx 63\,\text{mm}$).</div>
+    <hr>
+    <div id="ipdReadout" class="readout">Acquiring face landmarks…</div>
+  </div>
+
+  <!-- Mode 3: Wand Gesture Sandbox -->
+  <div id="wandPanel" class="panel">
+    <h3>Wand Gesture Sandbox 🪄</h3>
+    <div class="sub">Tracks index fingertip velocity (hand landmark 8). Flick your hand quickly to fire particle bursts!</div>
+    <hr>
+    <div class="row">
+      <span class="sub">Flick Threshold:</span>
+      <input type="range" id="flickSensSlider" min="1.0" max="4.0" step="0.2" value="2.0">
+      <span id="flickSensVal" style="font-size:11px; width:28px;">2.0</span>
+    </div>
+    <hr>
+    <div id="wandReadout" class="readout">Loading hand landmarker…</div>
+  </div>
+
+  <!-- Mode 4: Dynamic Model Sleep Profiler -->
+  <div id="sleepPanel" class="panel">
+    <h3>Dynamic Model Sleep &amp; Profiler</h3>
+    <div class="sub">Toggle vision models dynamically to inspect WASM/GPU inference latency and FPS throttling.</div>
+    <hr>
+    <label><input type="checkbox" id="sleepFaceToggle" checked> Face Landmarker (478 pts)</label>
+    <label><input type="checkbox" id="sleepHandToggle"> Hand Landmarker (21 pts)</label>
+    <label><input type="checkbox" id="sleepPoseToggle"> Pose Landmarker (33 pts)</label>
+    <hr>
+    <div id="sleepReadout" class="readout">Monitoring pipeline frame rates…</div>
+  </div>
+
+  <button id="start">
+    <div>🧪 Start Playground 2 Sandbox</div>
+    <div class="sub">Testing One-Euro Filters, Blink Guards, Metric IPD &amp; Wand Gestures. <a href="index.html">Main prototype</a></div>
+  </button>
+
+  <script type="module">
+    import {
+      FaceLandmarker,
+      HandLandmarker,
+      PoseLandmarker,
+      FilesetResolver
+    } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+    // Landmark Constants
+    const RIGHT_IRIS_CENTER = 468, LEFT_IRIS_CENTER = 473;
+    const RIGHT_EYE = { iris: 468, c1: 33, c2: 133, top: 159, bottom: 145 };
+    const LEFT_EYE  = { iris: 473, c1: 362, c2: 263, top: 386, bottom: 374 };
+
+    const CAL_POINTS = [
+      [0.12,0.12],[0.50,0.12],[0.88,0.12],
+      [0.88,0.50],[0.50,0.50],[0.12,0.50],
+      [0.12,0.88],[0.50,0.88],[0.88,0.88]
+    ];
+    const TILES = [
+      ["🎵","Music"],["📷","Camera"],
+      ["💬","Chat"], ["🗺️","Maps"],
+      ["✉️","Mail"], ["⚙️","Settings"]
+    ];
+
+    // DOM Elements
+    const video = document.getElementById("video");
+    const canvas = document.getElementById("overlay");
+    const ctx = canvas.getContext("2d");
+    const statusEl = document.getElementById("status");
+    const startBtn = document.getElementById("start");
+    const calBtn = document.getElementById("calibrateBtn");
+    const calTarget = document.getElementById("calTarget");
+    const cursorA = document.getElementById("gazeCursorA");
+    const cursorB = document.getElementById("gazeCursorB");
+    const targetsEl = document.getElementById("targets");
+
+    const gazePanel = document.getElementById("gazePanel");
+    const ipdPanel = document.getElementById("ipdPanel");
+    const wandPanel = document.getElementById("wandPanel");
+    const sleepPanel = document.getElementById("sleepPanel");
+
+    const gazeReadout = document.getElementById("gazeReadout");
+    const ipdReadout = document.getElementById("ipdReadout");
+    const wandReadout = document.getElementById("wandReadout");
+    const sleepReadout = document.getElementById("sleepReadout");
+
+    const blinkGuardToggle = document.getElementById("blinkGuardToggle");
+    const ridgeToggle = document.getElementById("ridgeToggle");
+    const minCutoffSlider = document.getElementById("minCutoffSlider");
+    const betaSlider = document.getElementById("betaSlider");
+    const minCutoffVal = document.getElementById("minCutoffVal");
+    const betaVal = document.getElementById("betaVal");
+
+    const flickSensSlider = document.getElementById("flickSensSlider");
+    const flickSensVal = document.getElementById("flickSensVal");
+
+    const sleepFaceToggle = document.getElementById("sleepFaceToggle");
+    const sleepHandToggle = document.getElementById("sleepHandToggle");
+    const sleepPoseToggle = document.getElementById("sleepPoseToggle");
+
+    // State Variables
+    let filesetResolver = null;
+    let faceLandmarker = null;
+    let handLandmarker = null;
+    let poseLandmarker = null;
+
+    let mode = "gaze"; // gaze | ipd | wand | sleep
+    let lastVideoTime = -1;
+    let calSamples = [];
+    let sampleBuf = null;
+    let fitLab = null;
+
+    // Filters & Metrics State
+    let lastPosB = null;
+    let particles = [];
+    let fingerTrail = [];
+    let lastFlickTime = 0;
+
+    // Performance Counters
+    let frameTimes = { face: [], hand: [], pose: [] };
+    let fpsCounter = { frames: 0, lastCheck: performance.now(), fps: 0 };
+    let jitterStatsA = [];
+    let jitterStatsB = [];
+
+    // -------------------------------------------------------------------------
+    // One Euro Filter Class Implementation
+    // -------------------------------------------------------------------------
+    class OneEuroFilter {
+      constructor(minCutoff = 1.0, beta = 0.007, dCutoff = 1.0) {
+        this.minCutoff = minCutoff;
+        this.beta = beta;
+        this.dCutoff = dCutoff;
+        this.xFilter = null;
+        this.dxFilter = null;
+        this.lastTime = null;
+      }
+      alpha(cutoff, dt) {
+        const tau = 1.0 / (2 * Math.PI * cutoff);
+        return 1.0 / (1.0 + tau / dt);
+      }
+      filter(val, timestamp) {
+        if (this.lastTime === null) {
+          this.lastTime = timestamp;
+          this.xFilter = val;
+          this.dxFilter = 0;
+          return val;
+        }
+        const dt = Math.max((timestamp - this.lastTime) / 1000, 0.001);
+        this.lastTime = timestamp;
+
+        const dVal = (val - this.xFilter) / dt;
+        const edVal = this.dxFilter + this.alpha(this.dCutoff, dt) * (dVal - this.dxFilter);
+        this.dxFilter = edVal;
+
+        const cutoff = this.minCutoff + this.beta * Math.abs(edVal);
+        const exVal = this.xFilter + this.alpha(cutoff, dt) * (val - this.xFilter);
+        this.xFilter = exVal;
+        return exVal;
+      }
+      reset() {
+        this.xFilter = null;
+        this.dxFilter = null;
+        this.lastTime = null;
+      }
+    }
+
+    class OneEuroPointFilter {
+      constructor(minCutoff = 1.0, beta = 0.007, dCutoff = 1.0) {
+        this.fx = new OneEuroFilter(minCutoff, beta, dCutoff);
+        this.fy = new OneEuroFilter(minCutoff, beta, dCutoff);
+      }
+      setParams(minCutoff, beta) {
+        this.fx.minCutoff = minCutoff;
+        this.fx.beta = beta;
+        this.fy.minCutoff = minCutoff;
+        this.fy.beta = beta;
+      }
+      filter(pt, timestamp) {
+        return [
+          this.fx.filter(pt[0], timestamp),
+          this.fy.filter(pt[1], timestamp)
+        ];
+      }
+      reset() {
+        this.fx.reset();
+        this.fy.reset();
+      }
+    }
+
+    const filterB = new OneEuroPointFilter(1.0, 0.007);
+
+    function setStatus(msg, isError = false) {
+      statusEl.textContent = msg;
+      statusEl.classList.toggle("error", isError);
+      statusEl.classList.remove("hidden");
+    }
+    const delay = (ms) => new Promise(r => setTimeout(r, ms));
+
+    // -------------------------------------------------------------------------
+    // Init MediaPipe
+    // -------------------------------------------------------------------------
+    async function initVision() {
+      setStatus("Loading MediaPipe Vision WASM...");
+      filesetResolver = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+      );
+    }
+
+    async function loadFaceModel() {
+      if (faceLandmarker) return;
+      setStatus("Loading Face Landmarker model...");
+      faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+          delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numFaces: 1,
+        outputFaceBlendshapes: true,
+        outputFacialTransformationMatrixes: true
+      });
+    }
+
+    async function loadHandModel() {
+      if (handLandmarker) return;
+      setStatus("Loading Hand Landmarker model...");
+      handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+          delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numHands: 2
+      });
+    }
+
+    async function loadPoseModel() {
+      if (poseLandmarker) return;
+      setStatus("Loading Pose Landmarker model...");
+      poseLandmarker = await PoseLandmarker.createFromOptions(filesetResolver, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker/lite/1/pose_landmarker.task",
+          delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numPoses: 1
+      });
+    }
+
+    async function startCamera() {
+      setStatus("Requesting front camera access...");
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+      });
+      video.srcObject = stream;
+      await new Promise((res) => (video.onloadedmetadata = res));
+      await video.play();
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      setStatus("Camera active ✔");
+    }
+
+    // -------------------------------------------------------------------------
+    // Feature Extraction & Linear/Ridge Solver
+    // -------------------------------------------------------------------------
+    function eyeFeature(lm, eye) {
+      const c1 = lm[eye.c1], c2 = lm[eye.c2], iris = lm[eye.iris];
+      const eyeW = Math.hypot(c2.x - c1.x, c2.y - c1.y) || 1;
+      const eyeH = Math.hypot(lm[eye.top].x - lm[eye.bottom].x, lm[eye.top].y - lm[eye.bottom].y) || 1;
+      const mx = (c1.x + c2.x) / 2, my = (c1.y + c2.y) / 2;
+      return [
+        (iris.x - mx) / eyeW,
+        (iris.y - my) / eyeH,
+        eyeH / eyeW
+      ];
+    }
+
+    function extractSignal(lm, blendshapes) {
+      const rf = eyeFeature(lm, RIGHT_EYE);
+      const lf = eyeFeature(lm, LEFT_EYE);
+      const irisX = (rf[0] + lf[0]) / 2;
+      const irisY = (rf[1] + lf[1]) / 2;
+
+      let bsX = 0, bsY = 0, blinkLeft = 0, blinkRight = 0;
+      if (blendshapes) {
+        for (const cat of blendshapes) {
+          if (cat.categoryName === "eyeLookInRight")  bsX -= cat.score;
+          if (cat.categoryName === "eyeLookOutRight") bsX += cat.score;
+          if (cat.categoryName === "eyeLookInLeft")   bsX += cat.score;
+          if (cat.categoryName === "eyeLookOutLeft")  bsX -= cat.score;
+          if (cat.categoryName === "eyeLookUpRight" || cat.categoryName === "eyeLookUpLeft") bsY -= cat.score;
+          if (cat.categoryName === "eyeLookDownRight" || cat.categoryName === "eyeLookDownLeft") bsY += cat.score;
+          if (cat.categoryName === "eyeBlinkLeft")  blinkLeft = cat.score;
+          if (cat.categoryName === "eyeBlinkRight") blinkRight = cat.score;
+        }
+      }
+
+      const nose = lm[1];
+      const headX = nose.x - 0.5;
+      const headY = nose.y - 0.5;
+
+      return {
+        irisX, irisY, bsX, bsY, headX, headY,
+        blinkLeft, blinkRight,
+        rightIris: lm[RIGHT_IRIS_CENTER],
+        leftIris: lm[LEFT_IRIS_CENTER]
+      };
+    }
+
+    function solveLinear(A, b) {
+      const n = A.length, m = A[0].length;
+      const M = A.map((row, i) => [...row, b[i]]);
+      for (let i = 0; i < m; i++) {
+        let maxR = i;
+        for (let r = i + 1; r < n; r++) {
+          if (Math.abs(M[r][i]) > Math.abs(M[maxR][i])) maxR = r;
+        }
+        [M[i], M[maxR]] = [M[maxR], M[i]];
+        if (Math.abs(M[i][i]) < 1e-12) continue;
+        for (let r = i + 1; r < n; r++) {
+          const factor = M[r][i] / M[i][i];
+          for (let c = i; c <= m; c++) M[r][c] -= factor * M[i][c];
+        }
+      }
+      const x = new Array(m).fill(0);
+      for (let i = m - 1; i >= 0; i--) {
+        let sum = M[i][m];
+        for (let c = i + 1; c < m; c++) sum -= M[i][c] * x[c];
+        x[i] = sum / (M[i][i] || 1e-12);
+      }
+      return x;
+    }
+
+    function fitRidge(samples, useRidge = true) {
+      if (samples.length < 6) return null;
+
+      function poly(s) {
+        const x = s.irisX, y = s.irisY, hx = s.headX, hy = s.headY;
+        return [1, x, y, x*x, y*y, x*y, hx, hy];
+      }
+
+      const A = samples.map(s => poly(s.signal));
+      const bx = samples.map(s => s.target[0]);
+      const by = samples.map(s => s.target[1]);
+
+      if (!useRidge) {
+        return {
+          cx: solveLinear(A, bx),
+          cy: solveLinear(A, by),
+          poly
+        };
+      }
+
+      // Ridge Regression (L2 penalty)
+      const M = A[0].length;
+      const lambda = 0.02;
+      const AtA = Array.from({ length: M }, () => new Float64Array(M));
+      const Atbx = new Float64Array(M);
+      const Atby = new Float64Array(M);
+
+      for (let i = 0; i < A.length; i++) {
+        for (let r = 0; r < M; r++) {
+          Atbx[r] += A[i][r] * bx[i];
+          Atby[r] += A[i][r] * by[i];
+          for (let c = 0; c < M; c++) {
+            AtA[r][c] += A[i][r] * A[i][c];
+          }
+        }
+      }
+      for (let r = 1; r < M; r++) AtA[r][r] += lambda; // Ridge on non-bias terms
+
+      const cx = solveLinear(AtA, Array.from(Atbx));
+      const cy = solveLinear(AtA, Array.from(Atby));
+      return { cx, cy, poly };
+    }
+
+    function evalFit(fit, signal) {
+      if (!fit) return [0.5, 0.5];
+      const p = fit.poly(signal);
+      let x = 0, y = 0;
+      for (let i = 0; i < p.length; i++) {
+        x += p[i] * fit.cx[i];
+        y += p[i] * fit.cy[i];
+      }
+      return [Math.max(0, Math.min(1, x)), Math.max(0, Math.min(1, y))];
+    }
+
+    // -------------------------------------------------------------------------
+    // Calibration Routine
+    // -------------------------------------------------------------------------
+    function buildTiles() {
+      targetsEl.innerHTML = "";
+      for (const [emoji, label] of TILES) {
+        const div = document.createElement("div");
+        div.className = "tile";
+        div.innerHTML = `<span class="emoji">${emoji}</span><span>${label}</span>`;
+        targetsEl.appendChild(div);
+      }
+    }
+
+    async function runCalibration() {
+      mode = "calibrating";
+      calBtn.style.display = "none";
+      targetsEl.classList.remove("visible");
+      cursorA.style.display = "none";
+      cursorB.style.display = "none";
+      calTarget.style.display = "block";
+      calSamples = [];
+      filterB.reset();
+
+      setStatus("Look at each yellow target until it turns green...");
+      for (let i = 0; i < CAL_POINTS.length; i++) {
+        const [nx, ny] = CAL_POINTS[i];
+        calTarget.style.left = `${nx * 100}%`;
+        calTarget.style.top = `${ny * 100}%`;
+        calTarget.classList.remove("sampling");
+
+        await delay(250);
+        sampleBuf = [];
+        calTarget.classList.add("sampling");
+        await delay(900);
+
+        const currentBuf = sampleBuf;
+        sampleBuf = null;
+
+        if (currentBuf && currentBuf.length >= 4) {
+          const avg = {
+            irisX: 0, irisY: 0, bsX: 0, bsY: 0, headX: 0, headY: 0
+          };
+          for (const s of currentBuf) {
+            avg.irisX += s.irisX; avg.irisY += s.irisY;
+            avg.bsX   += s.bsX;   avg.bsY   += s.bsY;
+            avg.headX += s.headX; avg.headY += s.headY;
+          }
+          const len = currentBuf.length;
+          avg.irisX /= len; avg.irisY /= len;
+          avg.bsX   /= len; avg.bsY   /= len;
+          avg.headX /= len; avg.headY /= len;
+
+          calSamples.push({ signal: avg, target: [nx, ny] });
+        }
+      }
+
+      calTarget.style.display = "none";
+      calBtn.style.display = "block";
+      fitLab = fitRidge(calSamples, ridgeToggle.checked);
+      mode = "gaze";
+      targetsEl.classList.add("visible");
+      cursorA.style.display = "block";
+      cursorB.style.display = "block";
+      setStatus("Calibration complete ✔ — benchmark active.");
+    }
+
+    // -------------------------------------------------------------------------
+    // Wand Particle System & Gesture Detection
+    // -------------------------------------------------------------------------
+    function spawnParticles(x, y) {
+      for (let i = 0; i < 24; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 3 + Math.random() * 9;
+        particles.push({
+          x, y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 1.0,
+          color: `hsl(${Math.floor(Math.random() * 60 + 280)}, 100%, 70%)`
+        });
+      }
+    }
+
+    function updateParticles() {
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const p = particles[i];
+        p.x += p.vx; p.y += p.vy;
+        p.vy += 0.2; // Gravity
+        p.life -= 0.03;
+        if (p.life <= 0) particles.splice(i, 1);
+        else {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 4 * p.life, 0, Math.PI * 2);
+          ctx.fillStyle = p.color;
+          ctx.fill();
+        }
+      }
+    }
+
+    function checkWandGesture(tip, timestamp) {
+      const tx = tip.x * canvas.width, ty = tip.y * canvas.height;
+      fingerTrail.push({ x: tx, y: ty, t: timestamp });
+      if (fingerTrail.length > 10) fingerTrail.shift();
+
+      if (fingerTrail.length >= 4) {
+        const first = fingerTrail[0];
+        const last = fingerTrail[fingerTrail.length - 1];
+        const dt = (last.t - first.t) / 1000;
+        const dist = Math.hypot(last.x - first.x, last.y - first.y);
+        const speed = dist / (dt || 0.001);
+
+        const sensThreshold = parseFloat(flickSensSlider.value) * 1000;
+        if (speed > sensThreshold && timestamp - lastFlickTime > 400) {
+          lastFlickTime = timestamp;
+          spawnParticles(tx, ty);
+          wandReadout.innerHTML = `<span class="good">✨ SWISH / FLICK DETECTED!</span>\nSpeed: ${speed.toFixed(0)} px/s`;
+        }
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Render Loop
+    // -------------------------------------------------------------------------
+    function renderLoop(timestamp) {
+      const now = performance.now();
+      fpsCounter.frames++;
+      if (now - fpsCounter.lastCheck >= 1000) {
+        fpsCounter.fps = Math.round((fpsCounter.frames * 1000) / (now - fpsCounter.lastCheck));
+        fpsCounter.frames = 0;
+        fpsCounter.lastCheck = now;
+      }
+
+      if (video.currentTime !== lastVideoTime && video.videoWidth > 0) {
+        lastVideoTime = video.currentTime;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // --- FACE INFERENCE ---
+        if (sleepFaceToggle.checked && faceLandmarker) {
+          const t0 = performance.now();
+          let fRes = null;
+          try {
+            fRes = faceLandmarker.detectForVideo(video, now);
+          } catch (e) {}
+          frameTimes.face.push(performance.now() - t0);
+          if (frameTimes.face.length > 30) frameTimes.face.shift();
+
+          if (fRes?.faceLandmarks?.length) {
+            const lm = fRes.faceLandmarks[0];
+            const blend = fRes.faceBlendshapes?.[0]?.categories;
+            const signal = extractSignal(lm, blend);
+
+            if (sampleBuf) sampleBuf.push(signal);
+
+            // Metric IPD distance estimation
+            const rIris = signal.rightIris, lIris = signal.leftIris;
+            const ipdPx = Math.hypot(
+              (rIris.x - lIris.x) * canvas.width,
+              (rIris.y - lIris.y) * canvas.height
+            );
+            const fx = canvas.width * 0.866; // FOV assumption ~60 deg
+            const distCm = (6.3 * fx) / (ipdPx || 1);
+            ipdReadout.innerHTML = `IPD: <span class="good">${ipdPx.toFixed(1)} px</span>\nPhysical Distance: <span class="accent">${distCm.toFixed(1)} cm</span> (${(distCm / 2.54).toFixed(1)} in)`;
+
+            // Draw Iris Indicators
+            ctx.fillStyle = "#00FF44";
+            ctx.beginPath(); ctx.arc(rIris.x * canvas.width, rIris.y * canvas.height, 4, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(lIris.x * canvas.width, lIris.y * canvas.height, 4, 0, Math.PI*2); ctx.fill();
+
+            // Gaze cursors
+            if (fitLab && mode === "gaze") {
+              const rawPos = evalFit(fitLab, signal);
+              const screenA = [rawPos[0] * window.innerWidth, rawPos[1] * window.innerHeight];
+
+              // Cursor A: Standard EMA
+              if (!jitterStatsA.length) jitterStatsA = screenA;
+              else {
+                screenA[0] = jitterStatsA[0] * 0.75 + screenA[0] * 0.25;
+                screenA[1] = jitterStatsA[1] * 0.75 + screenA[1] * 0.25;
+                jitterStatsA = screenA;
+              }
+              cursorA.style.transform = `translate3d(${screenA[0]}px, ${screenA[1]}px, 0)`;
+
+              // Cursor B: One Euro Filter + Blink Suppression
+              let targetB = rawPos;
+              const isBlinking = blinkGuardToggle.checked && (signal.blinkLeft > 0.4 || signal.blinkRight > 0.4);
+              if (isBlinking && lastPosB) targetB = lastPosB;
+              else lastPosB = targetB;
+
+              filterB.setParams(parseFloat(minCutoffSlider.value), parseFloat(betaSlider.value));
+              const filteredB = filterB.filter(targetB, timestamp);
+              const screenB = [filteredB[0] * window.innerWidth, filteredB[1] * window.innerHeight];
+              cursorB.style.transform = `translate3d(${screenB[0]}px, ${screenB[1]}px, 0)`;
+
+              gazeReadout.innerHTML = `Cursor A (EMA): (${screenA[0].toFixed(0)}, ${screenA[1].toFixed(0)})\n` +
+                `Cursor B (1€): (${screenB[0].toFixed(0)}, ${screenB[1].toFixed(0)})\n` +
+                `Blink Status: ${isBlinking ? '<span class="bad">BLINK / SQUINT DETECTED (LOCKED)</span>' : '<span class="good">Open</span>'}\n` +
+                `Ridge Penalty: ${ridgeToggle.checked ? '<span class="good">ON (λ=0.02)</span>' : '<span class="dim">OFF</span>'}`;
+            }
+          }
+        }
+
+        // --- HAND INFERENCE ---
+        if (sleepHandToggle.checked && handLandmarker) {
+          const t0 = performance.now();
+          let hRes = null;
+          try {
+            hRes = handLandmarker.detectForVideo(video, now);
+          } catch (e) {}
+          frameTimes.hand.push(performance.now() - t0);
+          if (frameTimes.hand.length > 30) frameTimes.hand.shift();
+
+          if (hRes?.landmarks?.length) {
+            const hand = hRes.landmarks[0];
+            const tip = hand[8]; // Index tip
+            checkWandGesture(tip, timestamp);
+
+            // Draw fingertip highlight
+            ctx.beginPath();
+            ctx.arc(tip.x * canvas.width, tip.y * canvas.height, 10, 0, Math.PI * 2);
+            ctx.strokeStyle = "#FF48D1";
+            ctx.lineWidth = 3;
+            ctx.stroke();
+          }
+        }
+
+        // --- POSE INFERENCE ---
+        if (sleepPoseToggle.checked && poseLandmarker) {
+          const t0 = performance.now();
+          try {
+            poseLandmarker.detectForVideo(video, now);
+          } catch (e) {}
+          frameTimes.pose.push(performance.now() - t0);
+          if (frameTimes.pose.length > 30) frameTimes.pose.shift();
+        }
+
+        updateParticles();
+
+        // Update Sleep/Profiler Readout
+        const avgF = frameTimes.face.length ? (frameTimes.face.reduce((a,b)=>a+b,0)/frameTimes.face.length).toFixed(1) : "OFF";
+        const avgH = frameTimes.hand.length ? (frameTimes.hand.reduce((a,b)=>a+b,0)/frameTimes.hand.length).toFixed(1) : "OFF";
+        const avgP = frameTimes.pose.length ? (frameTimes.pose.reduce((a,b)=>a+b,0)/frameTimes.pose.length).toFixed(1) : "OFF";
+
+        sleepReadout.innerHTML = `FPS: <span class="good">${fpsCounter.fps} fps</span>\n` +
+          `Face WASM Time: ${avgF} ms\n` +
+          `Hand WASM Time: ${avgH} ms\n` +
+          `Pose WASM Time: ${avgP} ms`;
+      }
+
+      if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
+        video.requestVideoFrameCallback(renderLoop);
+      } else {
+        requestAnimationFrame(renderLoop);
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Event Listeners & UI Switches
+    // -------------------------------------------------------------------------
+    document.getElementById("topbar").addEventListener("click", async (e) => {
+      const btn = e.target.closest("button[data-mode]");
+      if (!btn) return;
+      document.querySelectorAll("#modes .tb-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      mode = btn.dataset.mode;
+
+      gazePanel.classList.toggle("visible", mode === "gaze");
+      ipdPanel.classList.toggle("visible", mode === "ipd");
+      wandPanel.classList.toggle("visible", mode === "wand");
+      sleepPanel.classList.toggle("visible", mode === "sleep");
+
+      if (mode === "wand" && !handLandmarker) await loadHandModel();
+      if (mode === "sleep" && !poseLandmarker && sleepPoseToggle.checked) await loadPoseModel();
+    });
+
+    minCutoffSlider.addEventListener("input", () => minCutoffVal.textContent = minCutoffSlider.value);
+    betaSlider.addEventListener("input", () => betaVal.textContent = betaSlider.value);
+    flickSensSlider.addEventListener("input", () => flickSensVal.textContent = flickSensSlider.value);
+
+    ridgeToggle.addEventListener("change", () => {
+      if (calSamples.length) fitLab = fitRidge(calSamples, ridgeToggle.checked);
+    });
+
+    sleepHandToggle.addEventListener("change", async () => {
+      if (sleepHandToggle.checked && !handLandmarker) await loadHandModel();
+    });
+
+    sleepPoseToggle.addEventListener("change", async () => {
+      if (sleepPoseToggle.checked && !poseLandmarker) await loadPoseModel();
+    });
+
+    calBtn.addEventListener("click", runCalibration);
+
+    startBtn.addEventListener("click", async () => {
+      startBtn.classList.add("hidden");
+      try {
+        await initVision();
+        await loadFaceModel();
+        await startCamera();
+        buildTiles();
+        renderLoop(0);
+        setStatus("Playground 2 ready ✔ — Calibrate gaze or switch tabs.");
+      } catch (err) {
+        startBtn.classList.remove("hidden");
+        setStatus("Failed to start: " + err.message, true);
+      }
+    });
+  </script>
+</body>
+</html>
