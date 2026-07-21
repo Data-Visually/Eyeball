@@ -424,27 +424,44 @@
     async function loadHandModel() {
       if (handLandmarker) return;
       setStatus("Loading Hand Landmarker model...");
-      handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, {
+      const options = {
         baseOptions: {
           modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
           delegate: "GPU"
         },
         runningMode: "VIDEO",
         numHands: 2
-      });
+      };
+      try {
+        handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, options);
+      } catch (gpuErr) {
+        console.warn("[Eyeball] Hand GPU delegate failed, retrying CPU:", gpuErr);
+        options.baseOptions.delegate = "CPU";
+        handLandmarker = await HandLandmarker.createFromOptions(filesetResolver, options);
+      }
+      wandReadout.innerHTML = `<span class="good">Hand model active ✔</span>\nPoint index finger &amp; flick to trigger particle bursts!`;
+      setStatus("Hand model loaded ✔");
     }
 
     async function loadPoseModel() {
       if (poseLandmarker) return;
       setStatus("Loading Pose Landmarker model...");
-      poseLandmarker = await PoseLandmarker.createFromOptions(filesetResolver, {
+      const options = {
         baseOptions: {
-          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker/lite/1/pose_landmarker.task",
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
           delegate: "GPU"
         },
         runningMode: "VIDEO",
         numPoses: 1
-      });
+      };
+      try {
+        poseLandmarker = await PoseLandmarker.createFromOptions(filesetResolver, options);
+      } catch (gpuErr) {
+        console.warn("[Eyeball] Pose GPU delegate failed, retrying CPU:", gpuErr);
+        options.baseOptions.delegate = "CPU";
+        poseLandmarker = await PoseLandmarker.createFromOptions(filesetResolver, options);
+      }
+      setStatus("Pose model loaded ✔");
     }
 
     async function startCamera() {
@@ -783,7 +800,7 @@
         }
 
         // --- HAND INFERENCE ---
-        if (sleepHandToggle.checked && handLandmarker) {
+        if ((mode === "wand" || sleepHandToggle.checked) && handLandmarker) {
           const t0 = performance.now();
           let hRes = null;
           try {
