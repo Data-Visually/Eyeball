@@ -461,25 +461,30 @@
     }
 
     // -------------------------------------------------------------------------
-    // Feature Extraction & Linear/Ridge Solver
+    // Robust Feature Extraction & Standardized Ridge Solver
     // -------------------------------------------------------------------------
     function eyeFeature(lm, eye) {
-      const c1 = lm[eye.c1], c2 = lm[eye.c2], iris = lm[eye.iris];
-      const eyeW = Math.hypot(c2.x - c1.x, c2.y - c1.y) || 1;
-      const eyeH = Math.hypot(lm[eye.top].x - lm[eye.bottom].x, lm[eye.top].y - lm[eye.bottom].y) || 1;
-      const mx = (c1.x + c2.x) / 2, my = (c1.y + c2.y) / 2;
-      return [
-        (iris.x - mx) / eyeW,
-        (iris.y - my) / eyeH,
-        eyeH / eyeW
-      ];
+      const c1 = lm[eye.c1], c2 = lm[eye.c2];
+      const w = Math.hypot(c1.x - c2.x, c1.y - c2.y) || 1e-6;
+      const top = lm[eye.top], bottom = lm[eye.bottom];
+      const openness = Math.hypot(top.x - bottom.x, top.y - bottom.y) / w;
+      const cx = (c1.x + c2.x) / 2, cy = (c1.y + c2.y) / 2;
+      const iris = lm[eye.iris];
+      const balance =
+        (Math.hypot(iris.x - top.x, iris.y - top.y) -
+         Math.hypot(iris.x - bottom.x, iris.y - bottom.y)) / w;
+      return { off: [(iris.x - cx) / w, (iris.y - cy) / w], lid: [balance, openness] };
     }
 
     function extractSignal(lm, blendshapes) {
-      const rf = eyeFeature(lm, RIGHT_EYE);
-      const lf = eyeFeature(lm, LEFT_EYE);
-      const irisX = (rf[0] + lf[0]) / 2;
-      const irisY = (rf[1] + lf[1]) / 2;
+      const r = eyeFeature(lm, RIGHT_EYE);
+      const l = eyeFeature(lm, LEFT_EYE);
+      if (!r || !l) return null;
+
+      const irisX = (r.off[0] + l.off[0]) / 2;
+      const irisY = (r.off[1] + l.off[1]) / 2;
+      const lidBal = (r.lid[0] + l.lid[0]) / 2;
+      const lidOpen = (r.lid[1] + l.lid[1]) / 2;
 
       let bsX = 0, bsY = 0, blinkLeft = 0, blinkRight = 0;
       if (blendshapes) {
@@ -500,89 +505,102 @@
       const headY = nose.y - 0.5;
 
       return {
-        irisX, irisY, bsX, bsY, headX, headY,
+        irisX, irisY, lidBal, lidOpen, bsX, bsY, headX, headY,
         blinkLeft, blinkRight,
         rightIris: lm[RIGHT_IRIS_CENTER],
         leftIris: lm[LEFT_IRIS_CENTER]
       };
     }
 
-    function solveLinear(A, b) {
-      const n = A.length, m = A[0].length;
+    function buildFeatureVector(s) {
+      return [
+        s.irisX, s.irisY,
+        s.lidBal, s.lidOpen,
+        s.bsX, s.bsY,
+        s.headX, s.headY
+      ];
+    }
+
+    function basisCross(f) {
+      const o = [1, ...f];
+      for (let i = 0; i < f.length; i++) {
+        for (let j = i; j < f.length; j++) {
+          o.push(f[i] * f[j]);
+        }
+      }
+      return o;
+    }
+
+    const dot = (a, b) => a.reduce((sum, v, i) => sum + v * b[i], 0);
+
+    function solveLinearSystem(A, b) {
+      const n = b.length;
       const M = A.map((row, i) => [...row, b[i]]);
-      for (let i = 0; i < m; i++) {
-        let maxR = i;
-        for (let r = i + 1; r < n; r++) {
-          if (Math.abs(M[r][i]) > Math.abs(M[maxR][i])) maxR = r;
+      for (let col = 0; col < n; col++) {
+        let piv = col;
+        for (let r = col + 1; r < n; r++) {
+          if (Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r;
         }
-        [M[i], M[maxR]] = [M[maxR], M[i]];
-        if (Math.abs(M[i][i]) < 1e-12) continue;
-        for (let r = i + 1; r < n; r++) {
-          const factor = M[r][i] / M[i][i];
-          for (let c = i; c <= m; c++) M[r][c] -= factor * M[i][c];
+        [M[col], M[piv]] = [M[piv], M[col]];
+        if (Math.abs(M[col][col]) < 1e-12) return new Array(n).fill(0);
+        for (let r = 0; r < n; r++) {
+          if (r === col) continue;
+          const fac = M[r][col] / M[col][col];
+          for (let c = col; c <= n; c++) M[r][c] -= fac * M[col][c];
         }
       }
-      const x = new Array(m).fill(0);
-      for (let i = m - 1; i >= 0; i--) {
-        let sum = M[i][m];
-        for (let c = i + 1; c < m; c++) sum -= M[i][c] * x[c];
-        x[i] = sum / (M[i][i] || 1e-12);
-      }
-      return x;
+      return M.map((row, i) => row[n] / (row[i] || 1e-12));
     }
 
     function fitRidge(samples, useRidge = true) {
       if (samples.length < 6) return null;
 
-      function poly(s) {
-        const x = s.irisX, y = s.irisY, hx = s.headX, hy = s.headY;
-        return [1, x, y, x*x, y*y, x*y, hx, hy];
-      }
+      const rawRows = samples.map(s => buildFeatureVector(s.signal));
+      const dim = rawRows[0].length;
+      const n = rawRows.length;
 
-      const A = samples.map(s => poly(s.signal));
-      const bx = samples.map(s => s.target[0]);
-      const by = samples.map(s => s.target[1]);
+      // Feature Standardization (Mean & Std Dev)
+      const mean = new Array(dim).fill(0);
+      for (const f of rawRows) for (let i = 0; i < dim; i++) mean[i] += f[i] / n;
+      const std = new Array(dim).fill(0);
+      for (const f of rawRows) for (let i = 0; i < dim; i++) std[i] += (f[i] - mean[i]) ** 2 / n;
+      for (let i = 0; i < dim; i++) std[i] = Math.max(Math.sqrt(std[i]), 1e-6);
 
-      if (!useRidge) {
-        return {
-          cx: solveLinear(A, bx),
-          cy: solveLinear(A, by),
-          poly
-        };
-      }
+      const norm = (f) => f.map((v, i) => (v - mean[i]) / std[i]);
+      const X = rawRows.map(f => basisCross(norm(f)));
+      const k = X[0].length;
 
-      // Ridge Regression (L2 penalty)
-      const M = A[0].length;
-      const lambda = 0.02;
-      const AtA = Array.from({ length: M }, () => new Float64Array(M));
-      const Atbx = new Float64Array(M);
-      const Atby = new Float64Array(M);
-
-      for (let i = 0; i < A.length; i++) {
-        for (let r = 0; r < M; r++) {
-          Atbx[r] += A[i][r] * bx[i];
-          Atby[r] += A[i][r] * by[i];
-          for (let c = 0; c < M; c++) {
-            AtA[r][c] += A[i][r] * A[i][c];
+      const lambda = useRidge ? 0.02 * n : 1e-6;
+      const AtA = Array.from({ length: k }, () => new Array(k).fill(0));
+      X.forEach((row) => {
+        for (let i = 0; i < k; i++) {
+          for (let j = 0; j < k; j++) {
+            AtA[i][j] += row[i] * row[j];
           }
         }
-      }
-      for (let r = 1; r < M; r++) AtA[r][r] += lambda; // Ridge on non-bias terms
+      });
+      for (let i = 1; i < k; i++) AtA[i][i] += lambda; // L2 penalty on non-bias terms
 
-      const cx = solveLinear(AtA, Array.from(Atbx));
-      const cy = solveLinear(AtA, Array.from(Atby));
-      return { cx, cy, poly };
+      const fitAxis = (axis) => {
+        const Atb = new Array(k).fill(0);
+        samples.forEach((s, r) => {
+          for (let i = 0; i < k; i++) Atb[i] += X[r][i] * s.target[axis];
+        });
+        return solveLinearSystem(AtA, Atb);
+      };
+
+      const cx = fitAxis(0), cy = fitAxis(1);
+      return { mean, std, cx, cy };
     }
 
     function evalFit(fit, signal) {
       if (!fit) return [0.5, 0.5];
-      const p = fit.poly(signal);
-      let x = 0, y = 0;
-      for (let i = 0; i < p.length; i++) {
-        x += p[i] * fit.cx[i];
-        y += p[i] * fit.cy[i];
-      }
-      return [Math.max(0, Math.min(1, x)), Math.max(0, Math.min(1, y))];
+      const rawF = buildFeatureVector(signal);
+      const normF = rawF.map((v, i) => (v - fit.mean[i]) / fit.std[i]);
+      const b = basisCross(normF);
+      const gx = dot(b, fit.cx);
+      const gy = dot(b, fit.cy);
+      return [Math.max(0, Math.min(1, gx)), Math.max(0, Math.min(1, gy))];
     }
 
     // -------------------------------------------------------------------------
@@ -625,17 +643,19 @@
 
         if (currentBuf && currentBuf.length >= 4) {
           const avg = {
-            irisX: 0, irisY: 0, bsX: 0, bsY: 0, headX: 0, headY: 0
+            irisX: 0, irisY: 0, lidBal: 0, lidOpen: 0, bsX: 0, bsY: 0, headX: 0, headY: 0
           };
           for (const s of currentBuf) {
-            avg.irisX += s.irisX; avg.irisY += s.irisY;
-            avg.bsX   += s.bsX;   avg.bsY   += s.bsY;
-            avg.headX += s.headX; avg.headY += s.headY;
+            avg.irisX  += s.irisX;  avg.irisY  += s.irisY;
+            avg.lidBal += s.lidBal; avg.lidOpen += s.lidOpen;
+            avg.bsX    += s.bsX;    avg.bsY    += s.bsY;
+            avg.headX  += s.headX;  avg.headY  += s.headY;
           }
           const len = currentBuf.length;
-          avg.irisX /= len; avg.irisY /= len;
-          avg.bsX   /= len; avg.bsY   /= len;
-          avg.headX /= len; avg.headY /= len;
+          avg.irisX  /= len; avg.irisY  /= len;
+          avg.lidBal /= len; avg.lidOpen /= len;
+          avg.bsX    /= len; avg.bsY    /= len;
+          avg.headX  /= len; avg.headY  /= len;
 
           calSamples.push({ signal: avg, target: [nx, ny] });
         }
