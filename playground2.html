@@ -750,17 +750,24 @@
     function checkWandGesture(tip, timestamp) {
       const tx = tip.x * canvas.width, ty = tip.y * canvas.height;
       fingerTrail.push({ x: tx, y: ty, t: timestamp });
-      if (fingerTrail.length > 8) fingerTrail.shift();
+      if (fingerTrail.length > 10) fingerTrail.shift();
 
       if (fingerTrail.length >= 3) {
-        const first = fingerTrail[0];
-        const last = fingerTrail[fingerTrail.length - 1];
-        const dt = (last.t - first.t) / 1000;
-        const dist = Math.hypot(last.x - first.x, last.y - first.y);
-        const speed = dist / (dt || 0.001);
+        // PEAK per-segment velocity along the path. The old metric was net
+        // first→last displacement over the whole window — a swish doubles
+        // back on itself, so the endpoints cancel and the measured "speed"
+        // collapses exactly when you wave fastest. Segments with a large dt
+        // are tracking dropouts (motion blur), not motion — skip them.
+        let peak = 0;
+        for (let i = 1; i < fingerTrail.length; i++) {
+          const a = fingerTrail[i - 1], b = fingerTrail[i];
+          const dt = (b.t - a.t) / 1000;
+          if (dt <= 0 || dt > 0.1) continue;
+          peak = Math.max(peak, Math.hypot(b.x - a.x, b.y - a.y) / dt);
+        }
 
         const sensThreshold = parseFloat(flickSensSlider.value) * 1000;
-        const triggered = speed > sensThreshold && timestamp - lastFlickTime > 300;
+        const triggered = peak > sensThreshold && timestamp - lastFlickTime > 300;
 
         if (triggered) {
           lastFlickTime = timestamp;
@@ -772,7 +779,7 @@
           : (timestamp - lastFlickTime < 600 ? `<span class="good">✨ SPELL CASTING...</span>` : `<span class="dim">Tracking fingertip...</span>`);
 
         wandReadout.innerHTML = `${statusText}\n` +
-          `Speed: <span class="${triggered ? 'good' : 'accent'}">${speed.toFixed(0)} px/s</span> (Threshold: ${sensThreshold.toFixed(0)} px/s)`;
+          `Peak speed: <span class="${triggered ? 'good' : 'accent'}">${peak.toFixed(0)} px/s</span> (Threshold: ${sensThreshold.toFixed(0)} px/s)`;
       }
     }
 
@@ -880,12 +887,32 @@
             const tip = hand[8]; // Index tip
             checkWandGesture(tip, timestamp);
 
+            // Draw the wand trail — a fading streak through the recent
+            // fingertip path, so you can see exactly what the detector sees.
+            if (fingerTrail.length >= 2) {
+              for (let i = 1; i < fingerTrail.length; i++) {
+                const a = fingerTrail[i - 1], b = fingerTrail[i];
+                const age = i / fingerTrail.length;   // older → fainter
+                ctx.beginPath();
+                ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+                ctx.strokeStyle = `rgba(255,72,209,${0.15 + 0.6 * age})`;
+                ctx.lineWidth = 2 + 4 * age;
+                ctx.lineCap = "round";
+                ctx.stroke();
+              }
+            }
+
             // Draw fingertip highlight
             ctx.beginPath();
             ctx.arc(tip.x * canvas.width, tip.y * canvas.height, 10, 0, Math.PI * 2);
             ctx.strokeStyle = "#FF48D1";
             ctx.lineWidth = 3;
             ctx.stroke();
+          } else if (fingerTrail.length) {
+            // Hand lost (usually motion blur on a fast flick) — drop the
+            // stale trail so the next detection doesn't bridge the gap with
+            // a bogus slow segment.
+            fingerTrail = [];
           }
         }
 
