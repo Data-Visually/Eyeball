@@ -187,8 +187,8 @@
     <label><input type="checkbox" id="ridgeToggle" checked> Ridge Regression (L2 Penalty)</label>
     <div class="row">
       <span class="sub">1€ min cutoff:</span>
-      <input type="range" id="minCutoffSlider" min="0.1" max="3.0" step="0.1" value="1.0">
-      <span id="minCutoffVal" style="font-size:11px; width:28px;">1.0</span>
+      <input type="range" id="minCutoffSlider" min="0.1" max="3.0" step="0.1" value="0.3">
+      <span id="minCutoffVal" style="font-size:11px; width:28px;">0.3</span>
     </div>
     <div class="row">
       <span class="sub">1€ speed beta:</span>
@@ -319,8 +319,7 @@
     // Performance Counters
     let frameTimes = { face: [], hand: [], pose: [] };
     let fpsCounter = { frames: 0, lastCheck: performance.now(), fps: 0 };
-    let jitterStatsA = [];
-    let jitterStatsB = [];
+    let smoothA = null;   // cursor A speed-adaptive EMA state (normalized)
 
     // -------------------------------------------------------------------------
     // One Euro Filter Class Implementation
@@ -387,7 +386,7 @@
       }
     }
 
-    const filterB = new OneEuroPointFilter(1.0, 0.007);
+    const filterB = new OneEuroPointFilter(0.3, 0.007);
 
     function setStatus(msg, isError = false) {
       statusEl.textContent = msg;
@@ -480,7 +479,7 @@
     async function startCamera() {
       setStatus("Requesting front camera access...");
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { facingMode: "user", width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false
       });
       video.srcObject = stream;
@@ -642,7 +641,29 @@
       }
     }
 
+    // Tap-to-advance + settle + outlier trim, matching playground 1. The old
+    // auto-advancing dots sampled while the eyes were still in flight to the
+    // next dot — those saccade frames poisoned every dot's average and the
+    // fitted mapping drifted badly.
+    function waitForTap() {
+      return new Promise((resolve) => {
+        setTimeout(() => document.addEventListener("pointerdown", resolve, { once: true }), 350);
+      });
+    }
+
+    // MAD-trim on the right-iris offset (f[0], f[1]): drop saccade/jiggle
+    // frames far from the dot's median fixation.
+    function madTrimF(buf) {
+      if (buf.length < 6) return buf;
+      const med = (a) => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; };
+      const mx = med(buf.map(s => s.f[0])), my = med(buf.map(s => s.f[1]));
+      const mad = med(buf.map(s => Math.hypot(s.f[0] - mx, s.f[1] - my))) || 1e-6;
+      const tol = Math.max(3 * mad, 0.004);
+      return buf.filter(s => Math.hypot(s.f[0] - mx, s.f[1] - my) <= tol);
+    }
+
     async function runCalibration() {
+      if (mode === "calibrating") return;
       mode = "calibrating";
       calBtn.style.display = "none";
       targetsEl.classList.remove("visible");
@@ -650,28 +671,33 @@
       cursorB.style.display = "none";
       calTarget.style.display = "block";
       calSamples = [];
+      smoothA = null;
       filterB.reset();
 
-      setStatus("Look at each yellow target until it turns green...");
-      for (let i = 0; i < CAL_POINTS.length; i++) {
+      let i = 0;
+      while (i < CAL_POINTS.length) {
         const [nx, ny] = CAL_POINTS[i];
         calTarget.style.left = `${nx * 100}%`;
         calTarget.style.top = `${ny * 100}%`;
         calTarget.classList.remove("sampling");
+        setStatus(`Look at the yellow dot, then tap (${i + 1}/${CAL_POINTS.length})`);
+        await waitForTap();
 
-        await delay(250);
-        sampleBuf = [];
         calTarget.classList.add("sampling");
+        await delay(250);              // settle: tap jiggle + saccade landing
+        sampleBuf = [];
         await delay(900);
 
-        const currentBuf = sampleBuf;
+        const buf = madTrimF(sampleBuf || []);
         sampleBuf = null;
 
-        if (currentBuf && currentBuf.length >= 4) {
-          for (const s of currentBuf) {
-            calSamples.push({ f: s.f, target: [nx, ny] });
-          }
+        if (buf.length < 6) {
+          setStatus("Not enough clean samples — redoing that dot.");
+          await delay(1000);
+          continue;
         }
+        for (const s of buf) calSamples.push({ f: s.f, target: [nx, ny] });
+        i++;
       }
 
       calTarget.style.display = "none";
@@ -804,26 +830,31 @@
             // Gaze cursors
             if (signal && fitLab && mode === "gaze") {
               const rawPos = evalFit(fitLab, signal);
-              const screenA = [rawPos[0] * window.innerWidth, rawPos[1] * window.innerHeight];
 
-              // Cursor A: Standard EMA
-              if (!jitterStatsA.length) jitterStatsA = screenA;
+              // Cursor A: playground-1 baseline — speed-adaptive EMA (heavy
+              // while fixating, light during saccades).
+              if (!smoothA) smoothA = [rawPos[0], rawPos[1]];
               else {
-                screenA[0] = jitterStatsA[0] * 0.75 + screenA[0] * 0.25;
-                screenA[1] = jitterStatsA[1] * 0.75 + screenA[1] * 0.25;
-                jitterStatsA = screenA;
+                const a = Math.min(0.8, 0.12 + Math.hypot(rawPos[0]-smoothA[0], rawPos[1]-smoothA[1]) * 5);
+                smoothA = [smoothA[0] + (rawPos[0]-smoothA[0])*a, smoothA[1] + (rawPos[1]-smoothA[1])*a];
               }
+              const screenA = [smoothA[0] * window.innerWidth, smoothA[1] * window.innerHeight];
               cursorA.style.transform = `translate3d(${screenA[0]}px, ${screenA[1]}px, 0)`;
 
-              // Cursor B: One Euro Filter + Blink Suppression
+              // Cursor B: One Euro Filter + Blink Suppression.
+              // Filter in PIXEL space: minCutoff/beta defaults (1.0 / 0.007)
+              // are the standard values for pixel velocities. Fed normalized
+              // 0-1 coords, the speed term beta·|v| was ~0.02 Hz — nothing —
+              // and B degenerated into the same fixed EMA as A (the "both
+              // cursors on top of each other" report).
               let targetB = rawPos;
               const isBlinking = blinkGuardToggle.checked && (signal.blinkLeft > 0.4 || signal.blinkRight > 0.4);
               if (isBlinking && lastPosB) targetB = lastPosB;
               else lastPosB = targetB;
 
               filterB.setParams(parseFloat(minCutoffSlider.value), parseFloat(betaSlider.value));
-              const filteredB = filterB.filter(targetB, timestamp);
-              const screenB = [filteredB[0] * window.innerWidth, filteredB[1] * window.innerHeight];
+              const screenB = filterB.filter(
+                [targetB[0] * window.innerWidth, targetB[1] * window.innerHeight], timestamp);
               cursorB.style.transform = `translate3d(${screenB[0]}px, ${screenB[1]}px, 0)`;
 
               gazeReadout.innerHTML = `Cursor A (EMA): (${screenA[0].toFixed(0)}, ${screenA[1].toFixed(0)})\n` +
@@ -921,6 +952,7 @@
     document.getElementById("headToggle").addEventListener("change", (e) => {
       if (calSamples.length) {
         fitLab = fitRidge(calSamples, ridgeToggle.checked, e.target.checked);
+        smoothA = null;
         filterB.reset();
         setStatus(`Refit ${e.target.checked ? "eyes+head (22-D)" : "eyes only (16-D)"} from stored samples.`);
       }

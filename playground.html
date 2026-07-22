@@ -272,8 +272,8 @@
     <label><input type="checkbox" id="useBlinkGuardB" checked> Blink &amp; Squint Guard</label>
     <div class="row">
       <span class="sub">1€ min cutoff:</span>
-      <input type="range" id="minCutoffSlider" min="0.1" max="3.0" step="0.1" value="1.0">
-      <span id="minCutoffVal" style="font-size:11px; width:28px;">1.0</span>
+      <input type="range" id="minCutoffSlider" min="0.1" max="3.0" step="0.1" value="0.3">
+      <span id="minCutoffVal" style="font-size:11px; width:28px;">0.3</span>
     </div>
     <div class="row">
       <span class="sub">1€ speed beta:</span>
@@ -879,7 +879,7 @@
       }
       reset() { this.fx.reset(); this.fy.reset(); }
     }
-    const oneEuroFilterB = new OneEuroPointFilter(1.0, 0.007);
+    const oneEuroFilterB = new OneEuroPointFilter(0.3, 0.007);
 
     // Position a cursor + highlight the tile it lands on.
     function updateCursor(smoothedRef, fit, cfg, signal, cursorEl, cls, lookedRef, isModelB = false) {
@@ -901,10 +901,15 @@
       let sm;
       const useOneEuroB = document.getElementById("useOneEuroB")?.checked ?? true;
       if (isModelB && useOneEuroB) {
-        const mc = parseFloat(document.getElementById("minCutoffSlider")?.value || "1.0");
+        const mc = parseFloat(document.getElementById("minCutoffSlider")?.value || "0.3");
         const beta = parseFloat(document.getElementById("betaSlider")?.value || "0.007");
         oneEuroFilterB.setParams(mc, beta);
-        sm = oneEuroFilterB.filter(g, performance.now());
+        // Filter in PIXEL space — minCutoff/beta are tuned for pixel
+        // velocities; normalized coords make the speed term negligible and
+        // the 1€ filter degenerates into a plain EMA.
+        const p = oneEuroFilterB.filter(
+          [g[0] * window.innerWidth, g[1] * window.innerHeight], performance.now());
+        sm = [p[0] / window.innerWidth, p[1] / window.innerHeight];
       } else {
         sm = smooth(smoothedRef, g);
       }
