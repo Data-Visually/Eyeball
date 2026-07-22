@@ -180,18 +180,18 @@
   <!-- Mode 1: Gaze Filter Comparison -->
   <div id="gazePanel" class="panel visible">
     <h3>Gaze Enhancements Benchmark</h3>
-    <div class="sub">Compare baseline <span style="color:#00ff44">Cursor A (EMA)</span> vs. enhanced <span style="color:#ff48d1">Cursor B ($1\text{€}$ Filter + Blink Suppression)</span>.</div>
+    <div class="sub">Compare baseline <span style="color:#00ff44">Cursor A (EMA)</span> vs. enhanced <span style="color:#ff48d1">Cursor B (1€ filter + blink suppression)</span>.</div>
     <hr>
     <label><input type="checkbox" id="blinkGuardToggle" checked> Blink &amp; Squint Guard (B)</label>
     <label><input type="checkbox" id="headToggle"> Include Head Pose (Eyes Only if off)</label>
     <label><input type="checkbox" id="ridgeToggle" checked> Ridge Regression (L2 Penalty)</label>
     <div class="row">
-      <span class="sub">$1\text{€}$ Min Cutoff ($f_{c,\text{min}}$):</span>
+      <span class="sub">1€ min cutoff:</span>
       <input type="range" id="minCutoffSlider" min="0.1" max="3.0" step="0.1" value="1.0">
       <span id="minCutoffVal" style="font-size:11px; width:28px;">1.0</span>
     </div>
     <div class="row">
-      <span class="sub">$1\text{€}$ Speed Beta ($\beta$):</span>
+      <span class="sub">1€ speed beta:</span>
       <input type="range" id="betaSlider" min="0.001" max="0.05" step="0.001" value="0.007">
       <span id="betaVal" style="font-size:11px; width:38px;">0.007</span>
     </div>
@@ -202,7 +202,7 @@
   <!-- Mode 2: Metric IPD Distance -->
   <div id="ipdPanel" class="panel">
     <h3>Metric IPD Distance Estimator</h3>
-    <div class="sub">Computes real-world physical distance ($Z_{\text{cm}}$) using iris centers (landmarks 468 &amp; 473) assuming average human IPD ($\approx 63\,\text{mm}$).</div>
+    <div class="sub">Computes real-world distance to the camera from the iris centers (landmarks 468 &amp; 473), assuming an average human IPD of ~63&nbsp;mm.</div>
     <hr>
     <div id="ipdReadout" class="readout">Acquiring face landmarks…</div>
   </div>
@@ -545,9 +545,11 @@
         }
       }
 
-      const includeHead = document.getElementById("headToggle")?.checked ?? false;
-      const fullF = [...rr, ...ll, ...b, hx, hy, roll, nose.x, nose.y, iod];
-      const f = includeHead ? fullF : fullF.slice(0, 16);
+      // Always store the FULL 22-dim vector. The Eyes/Head toggle is applied
+      // by slicing at fit/eval time — slicing at capture time meant toggling
+      // after calibration fed a differently-sized vector into the fit (NaN
+      // cursor), and stored samples couldn't be refit the other way.
+      const f = [...rr, ...ll, ...b, hx, hy, roll, nose.x, nose.y, iod];
 
       return {
         f,
@@ -579,19 +581,22 @@
       return M.map((row, i) => row[n] / (row[i] || 1e-12));
     }
 
-    function fitRidge(samples, useRidge = true) {
+    function fitRidge(samples, useRidge = true, useHead = false) {
       if (samples.length < 10) return null;
-      const dim = samples[0].f.length;
-      const n = samples.length;
+      // Slice the stored full vectors down to eyes-only here if head is off,
+      // so the toggle can refit either way from the same stored samples.
+      const rows = samples.map(s => ({ f: useHead ? s.f : s.f.slice(0, 16), target: s.target }));
+      const dim = rows[0].f.length;
+      const n = rows.length;
 
       const mean = new Array(dim).fill(0);
-      for (const s of samples) for (let i = 0; i < dim; i++) mean[i] += s.f[i] / n;
+      for (const s of rows) for (let i = 0; i < dim; i++) mean[i] += s.f[i] / n;
       const std = new Array(dim).fill(0);
-      for (const s of samples) for (let i = 0; i < dim; i++) std[i] += (s.f[i] - mean[i]) ** 2 / n;
+      for (const s of rows) for (let i = 0; i < dim; i++) std[i] += (s.f[i] - mean[i]) ** 2 / n;
       for (let i = 0; i < dim; i++) std[i] = Math.max(Math.sqrt(std[i]), 1e-6);
 
       const norm = (f) => f.map((v, i) => (v - mean[i]) / std[i]);
-      const X = samples.map(s => basis(norm(s.f)));
+      const X = rows.map(s => basis(norm(s.f)));
       const k = X[0].length;
 
       const lambda = useRidge ? 1e-3 * n : 1e-6;
@@ -603,19 +608,21 @@
 
       const fitAxis = (axis) => {
         const Atb = new Array(k).fill(0);
-        samples.forEach((s, r) => {
+        rows.forEach((s, r) => {
           for (let i = 0; i < k; i++) Atb[i] += X[r][i] * s.target[axis];
         });
         return solveLinearSystem(AtA, Atb);
       };
 
       const coefX = fitAxis(0), coefY = fitAxis(1);
-      return { mean, std, coefX, coefY };
+      return { mean, std, coefX, coefY, useHead };
     }
 
     function evalFit(fit, signal) {
       if (!fit || !signal?.f) return [0.5, 0.5];
-      const normF = signal.f.map((v, i) => (v - fit.mean[i]) / fit.std[i]);
+      // Slice to match how the fit was trained (NOT the live checkbox).
+      const f = fit.useHead ? signal.f : signal.f.slice(0, 16);
+      const normF = f.map((v, i) => (v - fit.mean[i]) / fit.std[i]);
       const b = basis(normF);
       const gx = dot(b, fit.coefX);
       const gy = dot(b, fit.coefY);
@@ -669,7 +676,7 @@
 
       calTarget.style.display = "none";
       calBtn.style.display = "block";
-      fitLab = fitRidge(calSamples, ridgeToggle.checked);
+      fitLab = fitRidge(calSamples, ridgeToggle.checked, document.getElementById("headToggle").checked);
       mode = "gaze";
       targetsEl.classList.add("visible");
       cursorA.style.display = "block";
@@ -772,12 +779,10 @@
           if (fRes?.faceLandmarks?.length) {
             const lm = fRes.faceLandmarks[0];
             const blend = fRes.faceBlendshapes?.[0]?.categories;
-            const signal = extractSignal(lm, blend);
 
-            if (sampleBuf) sampleBuf.push(signal);
-
-            // Metric IPD distance estimation
-            const rIris = signal.rightIris, lIris = signal.leftIris;
+            // Metric IPD + iris dots straight from the landmarks — these must
+            // not depend on extractSignal, which returns null during a blink.
+            const rIris = lm[RIGHT_IRIS_CENTER], lIris = lm[LEFT_IRIS_CENTER];
             const ipdPx = Math.hypot(
               (rIris.x - lIris.x) * canvas.width,
               (rIris.y - lIris.y) * canvas.height
@@ -791,8 +796,13 @@
             ctx.beginPath(); ctx.arc(rIris.x * canvas.width, rIris.y * canvas.height, 4, 0, Math.PI*2); ctx.fill();
             ctx.beginPath(); ctx.arc(lIris.x * canvas.width, lIris.y * canvas.height, 4, 0, Math.PI*2); ctx.fill();
 
+            // Signal is null while both eyes are blinking — everything below
+            // must be guarded or the exception kills the render loop.
+            const signal = extractSignal(lm, blend);
+            if (signal && sampleBuf) sampleBuf.push(signal);
+
             // Gaze cursors
-            if (fitLab && mode === "gaze") {
+            if (signal && fitLab && mode === "gaze") {
               const rawPos = evalFit(fitLab, signal);
               const screenA = [rawPos[0] * window.innerWidth, rawPos[1] * window.innerHeight];
 
@@ -819,7 +829,7 @@
               gazeReadout.innerHTML = `Cursor A (EMA): (${screenA[0].toFixed(0)}, ${screenA[1].toFixed(0)})\n` +
                 `Cursor B (1€): (${screenB[0].toFixed(0)}, ${screenB[1].toFixed(0)})\n` +
                 `Blink Status: ${isBlinking ? '<span class="bad">BLINK / SQUINT DETECTED (LOCKED)</span>' : '<span class="good">Open</span>'}\n` +
-                `Ridge Penalty: ${ridgeToggle.checked ? '<span class="good">ON (λ=0.02)</span>' : '<span class="dim">OFF</span>'}`;
+                `Ridge Penalty: ${ridgeToggle.checked ? '<span class="good">ON (λ=1e-3·n)</span>' : '<span class="dim">OFF</span>'}`;
             }
           }
         }
@@ -902,7 +912,18 @@
     flickSensSlider.addEventListener("input", () => flickSensVal.textContent = flickSensSlider.value);
 
     ridgeToggle.addEventListener("change", () => {
-      if (calSamples.length) fitLab = fitRidge(calSamples, ridgeToggle.checked);
+      if (calSamples.length)
+        fitLab = fitRidge(calSamples, ridgeToggle.checked, document.getElementById("headToggle").checked);
+    });
+
+    // Eyes-only vs eyes+head: refit from the stored full vectors — the fit,
+    // not the capture, decides which features are used.
+    document.getElementById("headToggle").addEventListener("change", (e) => {
+      if (calSamples.length) {
+        fitLab = fitRidge(calSamples, ridgeToggle.checked, e.target.checked);
+        filterB.reset();
+        setStatus(`Refit ${e.target.checked ? "eyes+head (22-D)" : "eyes only (16-D)"} from stored samples.`);
+      }
     });
 
     sleepHandToggle.addEventListener("change", async () => {

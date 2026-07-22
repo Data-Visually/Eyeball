@@ -268,15 +268,15 @@
     <label><input type="checkbox" data-cfgb="perEye"> Per-eye iris</label>
     <hr>
     <div style="color:#00ff88; font-weight:600; margin:4px 0;">Model B Filters &amp; Guards</div>
-    <label><input type="checkbox" id="useOneEuroB" checked> Use $1\text{€}$ Filter (vs EMA)</label>
+    <label><input type="checkbox" id="useOneEuroB" checked> Use 1€ filter (vs EMA)</label>
     <label><input type="checkbox" id="useBlinkGuardB" checked> Blink &amp; Squint Guard</label>
     <div class="row">
-      <span class="sub">$1\text{€}$ Min Cutoff ($f_{c,\text{min}}$):</span>
+      <span class="sub">1€ min cutoff:</span>
       <input type="range" id="minCutoffSlider" min="0.1" max="3.0" step="0.1" value="1.0">
       <span id="minCutoffVal" style="font-size:11px; width:28px;">1.0</span>
     </div>
     <div class="row">
-      <span class="sub">$1\text{€}$ Speed Beta ($\beta$):</span>
+      <span class="sub">1€ speed beta:</span>
       <input type="range" id="betaSlider" min="0.001" max="0.05" step="0.001" value="0.007">
       <span id="betaVal" style="font-size:11px; width:38px;">0.007</span>
     </div>
@@ -609,6 +609,12 @@
       return {
         irisR: r?.off ?? null, irisL: l?.off ?? null, irisAvg: avg,
         lidR: r?.lid ?? null, lidL: l?.lid ?? null,
+        // Absolute iris-center separation (normalized image coords) — for the
+        // metric IPD readout. The irisR/irisL fields are per-eye OFFSETS from
+        // each eye's own corner midpoint, so their difference measures gaze
+        // vergence, not eye spacing; IPD must come from the raw landmarks.
+        ipdVec: [landmarks[RIGHT_IRIS_CENTER].x - landmarks[LEFT_IRIS_CENTER].x,
+                 landmarks[RIGHT_IRIS_CENTER].y - landmarks[LEFT_IRIS_CENTER].y],
         sizeR, sizeL,
         blend:b,
         headZ:[hx, hy],
@@ -1428,12 +1434,13 @@
         `head-pose z-proxy  hx ${(hz?.[0]??0).toFixed(3)}  hy ${(hz?.[1]??0).toFixed(3)}\n` +
         `nose (${signal?.nose?.[0].toFixed(3) ?? "?"}, ${signal?.nose?.[1].toFixed(3) ?? "?"})`;
 
-      // Metric IPD Distance Readout
+      // Metric IPD Distance Readout — from absolute iris centers (ipdVec),
+      // not the per-eye offset features (those measure vergence, not spacing).
       const ipdEl = document.getElementById("ipdReadout");
-      if (ipdEl && signal?.irisR && signal?.irisL) {
+      if (ipdEl && signal?.ipdVec) {
         const ipdPx = Math.hypot(
-          (signal.irisR[0] - signal.irisL[0]) * canvas.width,
-          (signal.irisR[1] - signal.irisL[1]) * canvas.height
+          signal.ipdVec[0] * canvas.width,
+          signal.ipdVec[1] * canvas.height
         );
         const fx = canvas.width * 0.866;
         const distCm = (6.3 * fx) / (ipdPx || 1);

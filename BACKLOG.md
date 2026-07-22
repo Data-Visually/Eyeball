@@ -38,5 +38,8 @@ first. Not commitments — a place so nothing gets lost between sessions.
 ## Cross-cutting
 - [ ] **Performance** — running 3 MediaPipe models + WebGL is heavy; profile
       framerate on real devices; consider disabling unused models per mode.
+      *Started:* playground2's Model Sleep profiler shows live per-model
+      inference ms + FPS with on/off toggles — use it to measure on real
+      hardware, then port the lazy on/off pattern into index.html.
 - [ ] **Scanner project** (separate) — depth-camera point cloud vs monocular
       depth estimation; MediaPipe as semantic registration on measured geometry.
